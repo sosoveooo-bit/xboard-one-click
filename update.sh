@@ -28,6 +28,7 @@ EXTRA_NPM_HTTPS_PORTS="${EXTRA_NPM_HTTPS_PORTS:-}"
 XBOARD_BRANCH="${XBOARD_BRANCH:-}"
 XBOARD_PORT="${XBOARD_PORT:-}"
 COMPOSE_CMD=()
+XBOARD_ENV_BACKUP_FILE=""
 
 log() {
   printf '[%s] %s\n' "$PROJECT_NAME" "$*"
@@ -46,6 +47,40 @@ run_compose() {
   local dir="$1"
   shift
   (cd "$dir" && "${COMPOSE_CMD[@]}" "$@")
+}
+
+cleanup_env_backup() {
+  if [ -n "${XBOARD_ENV_BACKUP_FILE:-}" ] && [ -f "$XBOARD_ENV_BACKUP_FILE" ]; then
+    rm -f "$XBOARD_ENV_BACKUP_FILE"
+  fi
+}
+
+backup_xboard_env() {
+  local env_file="$XBOARD_DIR/.env"
+
+  if [ ! -s "$env_file" ]; then
+    die "Xboard .env 不存在或为空，已停止更新以避免重启后崩溃。请先恢复 $env_file 后重试。"
+  fi
+
+  XBOARD_ENV_BACKUP_FILE="$(mktemp)"
+  cp "$env_file" "$XBOARD_ENV_BACKUP_FILE"
+  log "已临时备份 Xboard .env"
+}
+
+restore_xboard_env() {
+  local env_file="$XBOARD_DIR/.env"
+
+  if [ -z "${XBOARD_ENV_BACKUP_FILE:-}" ] || [ ! -f "$XBOARD_ENV_BACKUP_FILE" ]; then
+    die "未找到 Xboard .env 临时备份，已停止更新。"
+  fi
+
+  cp "$XBOARD_ENV_BACKUP_FILE" "$env_file"
+
+  if [ ! -s "$env_file" ]; then
+    die "Xboard .env 恢复失败，已停止更新以避免重启后崩溃。"
+  fi
+
+  log "已恢复 Xboard .env"
 }
 
 normalize_port_csv() {
@@ -177,12 +212,15 @@ PY
 }
 
 main() {
+  trap cleanup_env_backup EXIT
+
   load_deploy_env
   apply_defaults
   check_env
 
   [ -f "$NPM_DIR/compose.yaml" ] || die "未找到 NPM 部署目录，请先执行 ./install.sh"
   [ -d "$XBOARD_DIR/.git" ] || die "未找到 Xboard 运行目录，请先执行 ./install.sh"
+  backup_xboard_env
 
   log "按 deploy.env 重写 Nginx Proxy Manager compose 配置"
   write_npm_compose
@@ -195,6 +233,7 @@ main() {
   git -C "$XBOARD_DIR" fetch origin "$XBOARD_BRANCH" --depth 1
   git -C "$XBOARD_DIR" checkout "$XBOARD_BRANCH"
   git -C "$XBOARD_DIR" reset --hard "origin/$XBOARD_BRANCH"
+  restore_xboard_env
   ensure_xboard_port_mapping
 
   log "更新 Xboard 镜像并重建容器"
