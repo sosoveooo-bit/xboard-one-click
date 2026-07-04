@@ -615,6 +615,15 @@ run_update() {
   bash "$BASE_DIR/update.sh"
 }
 
+run_backup() {
+  if [[ ! -f "$BASE_DIR/backup.sh" ]]; then
+    warn "未找到备份脚本: $BASE_DIR/backup.sh"
+    return 1
+  fi
+
+  bash "$BASE_DIR/backup.sh"
+}
+
 run_uninstall() {
   local purge="$1"
   if [[ "$purge" == "1" ]]; then
@@ -721,8 +730,9 @@ show_menu() {
   echo "11. 启动 Xboard"
   echo "12. 查看 NPM 日志"
   echo "13. 查看 Xboard 日志"
-  echo "14. 卸载（保留数据）"
-  echo "15. 卸载（删除数据）"
+  echo "14. 一键打包迁移备份"
+  echo "15. 卸载（保留数据）"
+  echo "16. 卸载（删除数据）"
   echo "0.  退出"
   echo "=========================================="
 }
@@ -788,10 +798,14 @@ main() {
         pause
         ;;
       14)
-        run_uninstall 0
+        run_backup
         pause
         ;;
       15)
+        run_uninstall 0
+        pause
+        ;;
+      16)
         run_uninstall 1
         pause
         ;;
