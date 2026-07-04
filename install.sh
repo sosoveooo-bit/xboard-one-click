@@ -23,6 +23,7 @@ DEFAULT_FORCE_XBOARD_INSTALL=0
 DEFAULT_INTERACTIVE_CONFIG=0
 DEFAULT_AUTO_WRITE_DEPLOY_ENV=1
 DEFAULT_AUTO_INSTALL_DEPS=1
+DEFAULT_AUTO_RELEASE_NPM_PORTS=1
 
 INPUT_SERVER_IP="${SERVER_IP:-}"
 DETECTED_SERVER_IP=""
@@ -50,6 +51,7 @@ INPUT_FORCE_XBOARD_INSTALL="${FORCE_XBOARD_INSTALL:-}"
 INPUT_INTERACTIVE_CONFIG="${INTERACTIVE_CONFIG:-}"
 INPUT_AUTO_WRITE_DEPLOY_ENV="${AUTO_WRITE_DEPLOY_ENV:-}"
 INPUT_AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-}"
+INPUT_AUTO_RELEASE_NPM_PORTS="${AUTO_RELEASE_NPM_PORTS:-}"
 
 SERVER_IP="${SERVER_IP:-}"
 NPM_HTTP_PORT="${NPM_HTTP_PORT:-}"
@@ -74,6 +76,7 @@ FORCE_XBOARD_INSTALL="${FORCE_XBOARD_INSTALL:-}"
 INTERACTIVE_CONFIG="${INTERACTIVE_CONFIG:-}"
 AUTO_WRITE_DEPLOY_ENV="${AUTO_WRITE_DEPLOY_ENV:-}"
 AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-}"
+AUTO_RELEASE_NPM_PORTS="${AUTO_RELEASE_NPM_PORTS:-}"
 
 COMPOSE_CMD=()
 SUDO_CMD=()
@@ -207,6 +210,7 @@ restore_input_overrides() {
   [ -z "$INPUT_INTERACTIVE_CONFIG" ] || INTERACTIVE_CONFIG="$INPUT_INTERACTIVE_CONFIG"
   [ -z "$INPUT_AUTO_WRITE_DEPLOY_ENV" ] || AUTO_WRITE_DEPLOY_ENV="$INPUT_AUTO_WRITE_DEPLOY_ENV"
   [ -z "$INPUT_AUTO_INSTALL_DEPS" ] || AUTO_INSTALL_DEPS="$INPUT_AUTO_INSTALL_DEPS"
+  [ -z "$INPUT_AUTO_RELEASE_NPM_PORTS" ] || AUTO_RELEASE_NPM_PORTS="$INPUT_AUTO_RELEASE_NPM_PORTS"
   [ -z "$INPUT_SERVER_IP" ] || SERVER_IP="$INPUT_SERVER_IP"
 }
 
@@ -236,6 +240,7 @@ apply_defaults() {
   INTERACTIVE_CONFIG="${INTERACTIVE_CONFIG:-${DEFAULT_INTERACTIVE_CONFIG}}"
   AUTO_WRITE_DEPLOY_ENV="${AUTO_WRITE_DEPLOY_ENV:-${DEFAULT_AUTO_WRITE_DEPLOY_ENV}}"
   AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-${DEFAULT_AUTO_INSTALL_DEPS}}"
+  AUTO_RELEASE_NPM_PORTS="${AUTO_RELEASE_NPM_PORTS:-${DEFAULT_AUTO_RELEASE_NPM_PORTS}}"
 }
 
 print_usage() {
@@ -252,6 +257,7 @@ print_usage() {
 
 补充：
   AUTO_INSTALL_DEPS=1 时，会在 Debian/Ubuntu 上自动安装缺失依赖（如 docker）
+  AUTO_RELEASE_NPM_PORTS=1 时，会尝试停止 nginx/apache/openresty/caddy 释放 NPM 端口
 EOF
 }
 
@@ -260,6 +266,10 @@ print_startup_notice() {
     log "AUTO_INSTALL_DEPS=1：若检测到 Debian/Ubuntu 缺少 Docker / Compose / git / python3，将自动尝试安装"
   else
     log "AUTO_INSTALL_DEPS=0：已关闭自动安装依赖，请确保系统已手动安装 Docker / Compose / git / python3"
+  fi
+
+  if [ "$AUTO_RELEASE_NPM_PORTS" = "1" ]; then
+    log "AUTO_RELEASE_NPM_PORTS=1：若 80/443 被 nginx/apache/openresty/caddy 占用，将尝试自动释放给 NPM"
   fi
 
   log "访问地址将优先自动识别公网 IP；识别不到则回退到本机 IP，也可用 SERVER_IP=1.2.3.4 手动指定"
@@ -411,6 +421,7 @@ XBOARD_REPO=${XBOARD_REPO}
 XBOARD_BRANCH=${XBOARD_BRANCH}
 ENABLE_FIREWALL_OPEN=${ENABLE_FIREWALL_OPEN}
 FORCE_XBOARD_INSTALL=${FORCE_XBOARD_INSTALL}
+AUTO_RELEASE_NPM_PORTS=${AUTO_RELEASE_NPM_PORTS}
 EOF
 
   log "已写入配置文件: $DEPLOY_ENV_FILE"
@@ -502,6 +513,121 @@ check_env() {
   init_privilege_helper
 }
 
+list_port_listeners() {
+  local port="$1"
+
+  if command -v ss >/dev/null 2>&1; then
+    ss -H -ltnp 2>/dev/null | awk -v suffix=":${port}" '$4 ~ suffix "$" {print}'
+    return 0
+  fi
+
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltnp 2>/dev/null | awk -v suffix=":${port}" '$4 ~ suffix "$" {print}'
+    return 0
+  fi
+
+  return 0
+}
+
+detect_releasable_web_units() {
+  local listeners="$1"
+  local candidates=()
+  local seen=""
+  local unit
+
+  case "$listeners" in
+    *nginx*) candidates+=(nginx openresty) ;;
+  esac
+
+  case "$listeners" in
+    *apache2*) candidates+=(apache2) ;;
+  esac
+
+  case "$listeners" in
+    *httpd*) candidates+=(httpd) ;;
+  esac
+
+  case "$listeners" in
+    *caddy*) candidates+=(caddy) ;;
+  esac
+
+  command -v systemctl >/dev/null 2>&1 || return 0
+
+  for unit in "${candidates[@]}"; do
+    case " $seen " in
+      *" $unit "*) continue ;;
+    esac
+    seen="${seen} ${unit}"
+
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      printf '%s\n' "$unit"
+    fi
+  done
+}
+
+release_npm_ports_if_needed() {
+  [ "$AUTO_RELEASE_NPM_PORTS" = "1" ] || return 0
+
+  local ports=("$NPM_HTTP_PORT" "$NPM_HTTPS_PORT")
+  local port
+  local listeners
+  local all_listeners=""
+  local units
+  local unit
+  local answer
+  local still_listening=""
+
+  for port in "${ports[@]}"; do
+    listeners="$(list_port_listeners "$port" || true)"
+    if [ -n "$listeners" ]; then
+      warn "检测到 NPM 需要的宿主机端口 ${port} 已被占用："
+      printf '%s\n' "$listeners" >&2
+      all_listeners="${all_listeners}${listeners}"$'\n'
+    fi
+  done
+
+  [ -n "$all_listeners" ] || return 0
+
+  units="$(detect_releasable_web_units "$all_listeners" || true)"
+  if [ -z "$units" ]; then
+    die "端口已被占用，但占用进程不是脚本可安全处理的 nginx/apache/openresty/caddy。请手动释放 NPM 端口后重试。"
+  fi
+
+  warn "将停止并禁用以下系统 Web 服务，让 NPM 接管端口：$(printf '%s' "$units" | tr '\n' ' ')"
+  if [ "$INTERACTIVE_CONFIG" = "1" ] && [ -t 0 ]; then
+    read -r -p "是否继续？[Y/n]: " answer || true
+    case "$answer" in
+      n|N|no|NO|No)
+        die "已取消释放端口。请手动处理端口占用后重试。"
+        ;;
+    esac
+  fi
+
+  while IFS= read -r unit; do
+    [ -n "$unit" ] || continue
+    log "停止并禁用系统服务: $unit"
+    run_privileged systemctl stop "$unit"
+    run_privileged systemctl disable "$unit" >/dev/null 2>&1 || true
+  done <<< "$units"
+
+  sleep 1
+
+  for port in "${ports[@]}"; do
+    listeners="$(list_port_listeners "$port" || true)"
+    if [ -n "$listeners" ]; then
+      still_listening="${still_listening}${listeners}"$'\n'
+    fi
+  done
+
+  if [ -n "$still_listening" ]; then
+    warn "停止常见 Web 服务后端口仍被占用："
+    printf '%s\n' "$still_listening" >&2
+    die "NPM 端口仍未释放，请手动处理后重试。"
+  fi
+
+  log "NPM 所需宿主机端口已释放"
+}
+
 prepare_dirs() {
   mkdir -p "$WORK_DIR" "$NPM_DIR/data" "$NPM_DIR/letsencrypt"
 }
@@ -537,6 +663,7 @@ EOF
 }
 
 install_npm() {
+  release_npm_ports_if_needed
   log "写入 Nginx Proxy Manager compose 配置"
   write_npm_compose
   log "启动 Nginx Proxy Manager"
