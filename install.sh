@@ -572,6 +572,32 @@ detect_releasable_web_units() {
   done
 }
 
+npm_compose_owns_required_ports() {
+  local project
+  local ports
+
+  command -v docker >/dev/null 2>&1 || return 1
+  [ -f "$NPM_DIR/compose.yaml" ] || return 1
+
+  project="$(basename "$NPM_DIR")"
+  ports="$(docker ps \
+    --filter "label=com.docker.compose.project=${project}" \
+    --filter "label=com.docker.compose.service=app" \
+    --format '{{.Ports}}' 2>/dev/null || true)"
+
+  [ -n "$ports" ] || return 1
+
+  case "$ports" in
+    *":${NPM_HTTP_PORT}->80/tcp"*|*"${NPM_HTTP_PORT}->80/tcp"*) ;;
+    *) return 1 ;;
+  esac
+
+  case "$ports" in
+    *":${NPM_HTTPS_PORT}->443/tcp"*|*"${NPM_HTTPS_PORT}->443/tcp"*) ;;
+    *) return 1 ;;
+  esac
+}
+
 release_npm_ports_if_needed() {
   [ "$AUTO_RELEASE_NPM_PORTS" = "1" ] || return 0
 
@@ -579,6 +605,7 @@ release_npm_ports_if_needed() {
   local port
   local listeners
   local all_listeners=""
+  local non_docker_listeners=""
   local units
   local unit
   local answer
@@ -594,6 +621,12 @@ release_npm_ports_if_needed() {
   done
 
   [ -n "$all_listeners" ] || return 0
+
+  non_docker_listeners="$(printf '%s\n' "$all_listeners" | grep -v 'docker-proxy' || true)"
+  if [ -z "$non_docker_listeners" ] && npm_compose_owns_required_ports; then
+    log "检测到 80/443 由当前 NPM Docker 容器占用，继续复用现有容器"
+    return 0
+  fi
 
   units="$(detect_releasable_web_units "$all_listeners" || true)"
   if [ -z "$units" ]; then
