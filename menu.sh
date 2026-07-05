@@ -679,6 +679,22 @@ run_uninstall() {
   esac
 }
 
+run_full_uninstall() {
+  warn "即将彻底删除：容器、Docker volume、运行数据、备份目录、xb 快捷命令和整个项目脚本目录。"
+  warn "此操作不可恢复。"
+
+  read -r -p "如确认彻底卸载，请输入 DELETE: " confirm
+  case "$confirm" in
+    DELETE)
+      PURGE_ALL=1 bash "$BASE_DIR/uninstall.sh"
+      exit 0
+      ;;
+    *)
+      info "已取消。"
+      ;;
+  esac
+}
+
 service_action() {
   local label="$1"
   local dir="$2"
@@ -772,6 +788,7 @@ show_menu() {
   echo "17. 卸载（保留数据）"
   echo "18. 卸载（删除数据）"
   echo "19. 一键修复 Xboard 初始化 / 数据库 / 配置"
+  echo "20. 彻底卸载全部脚本和所有数据"
   echo "0.  退出"
   echo "=========================================="
 }
@@ -858,6 +875,10 @@ main() {
         ;;
       19)
         run_repair
+        pause
+        ;;
+      20)
+        run_full_uninstall
         pause
         ;;
       0)
