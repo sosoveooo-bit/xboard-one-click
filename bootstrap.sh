@@ -55,8 +55,8 @@ prepare_repo() {
       run_privileged git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
     fi
     run_privileged git -C "$INSTALL_DIR" fetch origin "$BRANCH" --depth 1
-    run_privileged git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
-    run_privileged git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
+    run_privileged git -C "$INSTALL_DIR" checkout -B "$BRANCH" FETCH_HEAD
+    run_privileged git -C "$INSTALL_DIR" reset --hard FETCH_HEAD
     return 0
   fi
 
