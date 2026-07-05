@@ -24,6 +24,7 @@ DEFAULT_INTERACTIVE_CONFIG=0
 DEFAULT_AUTO_WRITE_DEPLOY_ENV=1
 DEFAULT_AUTO_INSTALL_DEPS=1
 DEFAULT_AUTO_RELEASE_NPM_PORTS=1
+DEFAULT_PRE_UPDATE_BACKUP=1
 
 INPUT_SERVER_IP="${SERVER_IP:-}"
 DETECTED_SERVER_IP=""
@@ -52,6 +53,7 @@ INPUT_INTERACTIVE_CONFIG="${INTERACTIVE_CONFIG:-}"
 INPUT_AUTO_WRITE_DEPLOY_ENV="${AUTO_WRITE_DEPLOY_ENV:-}"
 INPUT_AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-}"
 INPUT_AUTO_RELEASE_NPM_PORTS="${AUTO_RELEASE_NPM_PORTS:-}"
+INPUT_PRE_UPDATE_BACKUP="${PRE_UPDATE_BACKUP:-}"
 
 SERVER_IP="${SERVER_IP:-}"
 NPM_HTTP_PORT="${NPM_HTTP_PORT:-}"
@@ -77,6 +79,7 @@ INTERACTIVE_CONFIG="${INTERACTIVE_CONFIG:-}"
 AUTO_WRITE_DEPLOY_ENV="${AUTO_WRITE_DEPLOY_ENV:-}"
 AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-}"
 AUTO_RELEASE_NPM_PORTS="${AUTO_RELEASE_NPM_PORTS:-}"
+PRE_UPDATE_BACKUP="${PRE_UPDATE_BACKUP:-}"
 
 COMPOSE_CMD=()
 SUDO_CMD=()
@@ -211,6 +214,7 @@ restore_input_overrides() {
   [ -z "$INPUT_AUTO_WRITE_DEPLOY_ENV" ] || AUTO_WRITE_DEPLOY_ENV="$INPUT_AUTO_WRITE_DEPLOY_ENV"
   [ -z "$INPUT_AUTO_INSTALL_DEPS" ] || AUTO_INSTALL_DEPS="$INPUT_AUTO_INSTALL_DEPS"
   [ -z "$INPUT_AUTO_RELEASE_NPM_PORTS" ] || AUTO_RELEASE_NPM_PORTS="$INPUT_AUTO_RELEASE_NPM_PORTS"
+  [ -z "$INPUT_PRE_UPDATE_BACKUP" ] || PRE_UPDATE_BACKUP="$INPUT_PRE_UPDATE_BACKUP"
   [ -z "$INPUT_SERVER_IP" ] || SERVER_IP="$INPUT_SERVER_IP"
 }
 
@@ -241,6 +245,7 @@ apply_defaults() {
   AUTO_WRITE_DEPLOY_ENV="${AUTO_WRITE_DEPLOY_ENV:-${DEFAULT_AUTO_WRITE_DEPLOY_ENV}}"
   AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-${DEFAULT_AUTO_INSTALL_DEPS}}"
   AUTO_RELEASE_NPM_PORTS="${AUTO_RELEASE_NPM_PORTS:-${DEFAULT_AUTO_RELEASE_NPM_PORTS}}"
+  PRE_UPDATE_BACKUP="${PRE_UPDATE_BACKUP:-${DEFAULT_PRE_UPDATE_BACKUP}}"
 }
 
 print_usage() {
@@ -258,6 +263,7 @@ print_usage() {
 补充：
   AUTO_INSTALL_DEPS=1 时，会在 Debian/Ubuntu 上自动安装缺失依赖（如 docker）
   AUTO_RELEASE_NPM_PORTS=1 时，会尝试停止 nginx/apache/openresty/caddy 释放 NPM 端口
+  PRE_UPDATE_BACKUP=1 时，更新前会自动生成迁移备份
 EOF
 }
 
@@ -422,6 +428,7 @@ XBOARD_BRANCH=${XBOARD_BRANCH}
 ENABLE_FIREWALL_OPEN=${ENABLE_FIREWALL_OPEN}
 FORCE_XBOARD_INSTALL=${FORCE_XBOARD_INSTALL}
 AUTO_RELEASE_NPM_PORTS=${AUTO_RELEASE_NPM_PORTS}
+PRE_UPDATE_BACKUP=${PRE_UPDATE_BACKUP}
 EOF
 
   log "已写入配置文件: $DEPLOY_ENV_FILE"
@@ -686,26 +693,44 @@ EOF
   run_privileged chmod +x "$target"
 }
 
+run_healthcheck() {
+  [ -f "$SCRIPT_DIR/healthcheck.sh" ] || return 0
+
+  log "执行安装后健康检查"
+  bash "$SCRIPT_DIR/healthcheck.sh" || warn "健康检查发现问题，请查看上方日志。"
+}
+
 clone_or_update_xboard() {
   if [ ! -d "$XBOARD_DIR/.git" ]; then
     log "拉取 Xboard (${XBOARD_BRANCH} 分支)"
     git clone -b "$XBOARD_BRANCH" --depth 1 "$XBOARD_REPO" "$XBOARD_DIR"
   else
+    local env_backup=""
     log "检测到已存在 Xboard 仓库，执行更新"
+    if [ -s "$XBOARD_DIR/.env" ]; then
+      env_backup="$(mktemp)"
+      cp "$XBOARD_DIR/.env" "$env_backup"
+      log "已临时备份 Xboard .env"
+    fi
     git -C "$XBOARD_DIR" fetch origin "$XBOARD_BRANCH" --depth 1
     git -C "$XBOARD_DIR" checkout "$XBOARD_BRANCH"
     git -C "$XBOARD_DIR" reset --hard "origin/$XBOARD_BRANCH"
+    if [ -n "$env_backup" ]; then
+      cp "$env_backup" "$XBOARD_DIR/.env"
+      rm -f "$env_backup"
+      log "已恢复 Xboard .env"
+    fi
   fi
 }
 
 prepare_xboard_env() {
   mkdir -p "$XBOARD_DIR/.docker/.data" "$XBOARD_DIR/storage/logs" "$XBOARD_DIR/storage/theme" "$XBOARD_DIR/plugins"
 
-  if [ -f "$XBOARD_DIR/.env.example" ] && [ ! -f "$XBOARD_DIR/.env" ]; then
+  if [ -f "$XBOARD_DIR/.env.example" ] && [ ! -s "$XBOARD_DIR/.env" ]; then
     cp "$XBOARD_DIR/.env.example" "$XBOARD_DIR/.env"
   fi
 
-  if [ ! -f "$XBOARD_DIR/.env" ]; then
+  if [ ! -s "$XBOARD_DIR/.env" ]; then
     cat >"$XBOARD_DIR/.env" <<EOF
 APP_NAME=XBoard
 APP_ENV=local
@@ -1031,6 +1056,7 @@ main() {
   resolve_xboard_admin_path
   write_npm_proxy_template
   open_firewall_ports
+  run_healthcheck
   print_summary
 }
 

@@ -13,6 +13,7 @@ BACKUP_FILE="${BACKUP_FILE:-}"
 COMPOSE_CMD=()
 STOPPED_NPM=0
 STOPPED_XBOARD=0
+CREATED_BACKUP_FILE=""
 
 log() {
   printf '[%s] %s\n' "$PROJECT_NAME" "$*"
@@ -110,6 +111,40 @@ backup_size() {
   fi
 }
 
+write_backup_sidecars() {
+  local file="$1"
+  local info_file="${file}.info"
+  local checksum_file="${file}.sha256"
+  local git_commit="unknown"
+  local git_branch="unknown"
+
+  if command -v git >/dev/null 2>&1 && [ -d "$SCRIPT_DIR/.git" ]; then
+    git_commit="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+    git_branch="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
+  fi
+
+  {
+    printf 'backup_file=%s\n' "$file"
+    printf 'created_at=%s\n' "$(date -Iseconds 2>/dev/null || date)"
+    printf 'project_dir=%s\n' "$SCRIPT_DIR"
+    printf 'git_branch=%s\n' "$git_branch"
+    printf 'git_commit=%s\n' "$git_commit"
+    printf 'size=%s\n' "$(backup_size "$file")"
+    if [ -f "$SCRIPT_DIR/deploy.env" ]; then
+      printf '\n[deploy.env]\n'
+      grep -E '^(NPM_HTTP_PORT|NPM_HTTPS_PORT|NPM_ADMIN_PORT|XBOARD_PORT|XBOARD_BRANCH)=' "$SCRIPT_DIR/deploy.env" || true
+    fi
+  } >"$info_file"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" >"$checksum_file"
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" >"$checksum_file"
+  else
+    warn "未找到 sha256sum / shasum，跳过校验文件生成。"
+  fi
+}
+
 create_backup() {
   local timestamp
   local output_file
@@ -130,6 +165,10 @@ create_backup() {
 
   log "备份完成: $output_file"
   log "备份大小: $(backup_size "$output_file")"
+  write_backup_sidecars "$output_file"
+  CREATED_BACKUP_FILE="$output_file"
+  log "备份说明: ${output_file}.info"
+  [ -f "${output_file}.sha256" ] && log "校验文件: ${output_file}.sha256"
   log "迁移到新服务器后执行: tar -xzf $(basename "$output_file") -C /root"
 }
 

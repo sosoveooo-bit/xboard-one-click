@@ -624,6 +624,32 @@ run_backup() {
   bash "$BASE_DIR/backup.sh"
 }
 
+run_healthcheck() {
+  if [[ ! -f "$BASE_DIR/healthcheck.sh" ]]; then
+    warn "未找到健康检查脚本: $BASE_DIR/healthcheck.sh"
+    return 1
+  fi
+
+  bash "$BASE_DIR/healthcheck.sh"
+}
+
+run_restore() {
+  local archive
+
+  if [[ ! -f "$BASE_DIR/restore.sh" ]]; then
+    warn "未找到恢复脚本: $BASE_DIR/restore.sh"
+    return 1
+  fi
+
+  read -r -p "请输入备份包路径: " archive
+  if [[ -z "$archive" ]]; then
+    warn "备份包路径不能为空。"
+    return 1
+  fi
+
+  bash "$BASE_DIR/restore.sh" "$archive"
+}
+
 run_uninstall() {
   local purge="$1"
   if [[ "$purge" == "1" ]]; then
@@ -730,9 +756,11 @@ show_menu() {
   echo "11. 启动 Xboard"
   echo "12. 查看 NPM 日志"
   echo "13. 查看 Xboard 日志"
-  echo "14. 一键打包迁移备份"
-  echo "15. 卸载（保留数据）"
-  echo "16. 卸载（删除数据）"
+  echo "14. 健康检查 / 诊断"
+  echo "15. 一键打包迁移备份"
+  echo "16. 从备份恢复"
+  echo "17. 卸载（保留数据）"
+  echo "18. 卸载（删除数据）"
   echo "0.  退出"
   echo "=========================================="
 }
@@ -798,14 +826,22 @@ main() {
         pause
         ;;
       14)
-        run_backup
+        run_healthcheck
         pause
         ;;
       15)
-        run_uninstall 0
+        run_backup
         pause
         ;;
       16)
+        run_restore
+        pause
+        ;;
+      17)
+        run_uninstall 0
+        pause
+        ;;
+      18)
         run_uninstall 1
         pause
         ;;

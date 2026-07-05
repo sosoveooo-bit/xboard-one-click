@@ -13,6 +13,7 @@ DEFAULT_NPM_HTTP_PORT=80
 DEFAULT_NPM_HTTPS_PORT=443
 DEFAULT_NPM_ADMIN_PORT=81
 DEFAULT_XBOARD_PORT=7001
+DEFAULT_PRE_UPDATE_BACKUP=1
 
 INPUT_NPM_HTTP_PORT="${NPM_HTTP_PORT:-}"
 INPUT_NPM_HTTPS_PORT="${NPM_HTTPS_PORT:-}"
@@ -20,6 +21,7 @@ INPUT_NPM_ADMIN_PORT="${NPM_ADMIN_PORT:-}"
 INPUT_EXTRA_NPM_HTTPS_PORTS="${EXTRA_NPM_HTTPS_PORTS:-}"
 INPUT_XBOARD_BRANCH="${XBOARD_BRANCH:-}"
 INPUT_XBOARD_PORT="${XBOARD_PORT:-}"
+INPUT_PRE_UPDATE_BACKUP="${PRE_UPDATE_BACKUP:-}"
 
 NPM_HTTP_PORT="${NPM_HTTP_PORT:-}"
 NPM_HTTPS_PORT="${NPM_HTTPS_PORT:-}"
@@ -27,6 +29,7 @@ NPM_ADMIN_PORT="${NPM_ADMIN_PORT:-}"
 EXTRA_NPM_HTTPS_PORTS="${EXTRA_NPM_HTTPS_PORTS:-}"
 XBOARD_BRANCH="${XBOARD_BRANCH:-}"
 XBOARD_PORT="${XBOARD_PORT:-}"
+PRE_UPDATE_BACKUP="${PRE_UPDATE_BACKUP:-}"
 COMPOSE_CMD=()
 XBOARD_ENV_BACKUP_FILE=""
 
@@ -83,6 +86,27 @@ restore_xboard_env() {
   log "已恢复 Xboard .env"
 }
 
+run_pre_update_backup() {
+  [ "$PRE_UPDATE_BACKUP" = "1" ] || {
+    log "已跳过更新前备份（PRE_UPDATE_BACKUP=${PRE_UPDATE_BACKUP}）"
+    return 0
+  }
+
+  [ -f "$SCRIPT_DIR/backup.sh" ] || die "未找到备份脚本，无法执行更新前备份: $SCRIPT_DIR/backup.sh"
+  log "开始更新前自动备份"
+  BACKUP_DIR="${SCRIPT_DIR}-backups/pre-update" bash "$SCRIPT_DIR/backup.sh"
+}
+
+run_healthcheck() {
+  [ -f "$SCRIPT_DIR/healthcheck.sh" ] || {
+    log "未找到 healthcheck.sh，跳过健康检查"
+    return 0
+  }
+
+  log "执行更新后健康检查"
+  bash "$SCRIPT_DIR/healthcheck.sh" || log "健康检查发现问题，请查看上方日志。"
+}
+
 normalize_port_csv() {
   printf '%s' "$1" | tr ', ' '\n\n' | awk 'NF && !seen[$0]++ {printf("%s%s", sep, $0); sep=","}'
 }
@@ -131,6 +155,7 @@ load_deploy_env() {
   [ -z "$INPUT_EXTRA_NPM_HTTPS_PORTS" ] || EXTRA_NPM_HTTPS_PORTS="$INPUT_EXTRA_NPM_HTTPS_PORTS"
   [ -z "$INPUT_XBOARD_BRANCH" ] || XBOARD_BRANCH="$INPUT_XBOARD_BRANCH"
   [ -z "$INPUT_XBOARD_PORT" ] || XBOARD_PORT="$INPUT_XBOARD_PORT"
+  [ -z "$INPUT_PRE_UPDATE_BACKUP" ] || PRE_UPDATE_BACKUP="$INPUT_PRE_UPDATE_BACKUP"
 }
 
 apply_defaults() {
@@ -140,6 +165,7 @@ apply_defaults() {
   EXTRA_NPM_HTTPS_PORTS="${EXTRA_NPM_HTTPS_PORTS:-}"
   XBOARD_BRANCH="${XBOARD_BRANCH:-${DEFAULT_XBOARD_BRANCH}}"
   XBOARD_PORT="${XBOARD_PORT:-${DEFAULT_XBOARD_PORT}}"
+  PRE_UPDATE_BACKUP="${PRE_UPDATE_BACKUP:-${DEFAULT_PRE_UPDATE_BACKUP}}"
 }
 
 write_npm_compose() {
@@ -220,6 +246,7 @@ main() {
 
   [ -f "$NPM_DIR/compose.yaml" ] || die "未找到 NPM 部署目录，请先执行 ./install.sh"
   [ -d "$XBOARD_DIR/.git" ] || die "未找到 Xboard 运行目录，请先执行 ./install.sh"
+  run_pre_update_backup
   backup_xboard_env
 
   log "按 deploy.env 重写 Nginx Proxy Manager compose 配置"
@@ -242,6 +269,7 @@ main() {
   run_compose "$XBOARD_DIR" port xboard 7001
 
   install_menu_shortcut
+  run_healthcheck
 
   log "更新完成（当前 Xboard 对外端口: $XBOARD_PORT）"
 }

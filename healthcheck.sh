@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+set -u
+
+PROJECT_NAME="xboard-one-click-healthcheck"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK_DIR="${SCRIPT_DIR}/runtime"
+NPM_DIR="${WORK_DIR}/nginx-proxy-manager"
+XBOARD_DIR="${WORK_DIR}/Xboard"
+DEPLOY_ENV_FILE="${SCRIPT_DIR}/deploy.env"
+
+DEFAULT_NPM_HTTP_PORT=80
+DEFAULT_NPM_HTTPS_PORT=443
+DEFAULT_NPM_ADMIN_PORT=81
+DEFAULT_XBOARD_PORT=7001
+
+NPM_HTTP_PORT="${NPM_HTTP_PORT:-}"
+NPM_HTTPS_PORT="${NPM_HTTPS_PORT:-}"
+NPM_ADMIN_PORT="${NPM_ADMIN_PORT:-}"
+XBOARD_PORT="${XBOARD_PORT:-}"
+COMPOSE_CMD=()
+FAILURES=0
+
+info() {
+  printf '[%s] %s\n' "$PROJECT_NAME" "$*"
+}
+
+warn() {
+  printf '[%s][WARN] %s\n' "$PROJECT_NAME" "$*" >&2
+}
+
+fail() {
+  warn "$*"
+  FAILURES=$((FAILURES + 1))
+}
+
+load_deploy_env() {
+  if [ -f "$DEPLOY_ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$DEPLOY_ENV_FILE"
+    set +a
+  fi
+
+  NPM_HTTP_PORT="${NPM_HTTP_PORT:-${DEFAULT_NPM_HTTP_PORT}}"
+  NPM_HTTPS_PORT="${NPM_HTTPS_PORT:-${DEFAULT_NPM_HTTPS_PORT}}"
+  NPM_ADMIN_PORT="${NPM_ADMIN_PORT:-${DEFAULT_NPM_ADMIN_PORT}}"
+  XBOARD_PORT="${XBOARD_PORT:-${DEFAULT_XBOARD_PORT}}"
+}
+
+init_compose() {
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker compose)
+  elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker-compose)
+  else
+    COMPOSE_CMD=()
+  fi
+}
+
+has_compose_file() {
+  local dir="$1"
+  [ -f "$dir/compose.yaml" ] || [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/docker-compose.yaml" ]
+}
+
+run_compose() {
+  local dir="$1"
+  shift
+  (cd "$dir" && "${COMPOSE_CMD[@]}" "$@")
+}
+
+show_command_state() {
+  local cmd="$1"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    info "命令可用: $cmd ($(command -v "$cmd"))"
+  else
+    fail "缺少命令: $cmd"
+  fi
+}
+
+show_port_listener() {
+  local port="$1"
+  local listeners=""
+
+  if command -v ss >/dev/null 2>&1; then
+    listeners="$(ss -H -ltnp 2>/dev/null | awk -v suffix=":${port}" '$4 ~ suffix "$" {print}' || true)"
+  elif command -v netstat >/dev/null 2>&1; then
+    listeners="$(netstat -ltnp 2>/dev/null | awk -v suffix=":${port}" '$4 ~ suffix "$" {print}' || true)"
+  fi
+
+  if [ -n "$listeners" ]; then
+    info "端口 ${port} 监听中:"
+    printf '%s\n' "$listeners"
+  else
+    warn "端口 ${port} 未监听"
+  fi
+}
+
+check_compose_project() {
+  local label="$1"
+  local dir="$2"
+
+  if [ ${#COMPOSE_CMD[@]} -eq 0 ]; then
+    fail "无法检查 ${label}: 未找到 docker compose / docker-compose"
+    return
+  fi
+
+  if ! has_compose_file "$dir"; then
+    fail "无法检查 ${label}: 未找到 Compose 文件: $dir"
+    return
+  fi
+
+  info "${label} Compose 状态"
+  if ! run_compose "$dir" ps; then
+    fail "${label} Compose 状态检查失败"
+  fi
+}
+
+check_http_port() {
+  local label="$1"
+  local port="$2"
+  local code
+
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "未安装 curl，跳过 HTTP 检查: $label"
+    return
+  fi
+
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:${port}" 2>/dev/null || true)"
+  case "$code" in
+    2*|3*)
+      info "${label} 本机 HTTP 检查通过: http://127.0.0.1:${port} (${code})"
+      ;;
+    *)
+      fail "${label} 本机 HTTP 检查失败: http://127.0.0.1:${port} (${code:-no-response})"
+      ;;
+  esac
+}
+
+check_xboard_env() {
+  local env_file="$XBOARD_DIR/.env"
+
+  if [ ! -s "$env_file" ]; then
+    fail "Xboard .env 不存在或为空: $env_file"
+    return
+  fi
+
+  info "Xboard .env 存在且非空"
+  grep -q '^APP_KEY=.' "$env_file" || fail "Xboard .env 缺少 APP_KEY 或 APP_KEY 为空"
+  grep -q '^DB_CONNECTION=.' "$env_file" || fail "Xboard .env 缺少 DB_CONNECTION"
+  grep -q '^REDIS_HOST=.' "$env_file" || fail "Xboard .env 缺少 REDIS_HOST"
+}
+
+show_recent_logs() {
+  local label="$1"
+  local dir="$2"
+  local service="$3"
+
+  [ ${#COMPOSE_CMD[@]} -gt 0 ] || return
+  has_compose_file "$dir" || return
+
+  info "${label} 最近日志"
+  run_compose "$dir" logs --tail=80 "$service" || true
+}
+
+main() {
+  load_deploy_env
+  init_compose
+
+  info "项目目录: $SCRIPT_DIR"
+  info "NPM 端口: HTTP=${NPM_HTTP_PORT}, HTTPS=${NPM_HTTPS_PORT}, 管理=${NPM_ADMIN_PORT}"
+  info "Xboard 端口: ${XBOARD_PORT}"
+
+  show_command_state docker
+  show_command_state git
+  show_command_state python3
+  command -v curl >/dev/null 2>&1 && show_command_state curl || warn "未安装 curl，HTTP 检查会跳过"
+
+  if command -v docker >/dev/null 2>&1; then
+    docker info >/dev/null 2>&1 || fail "当前用户无法访问 Docker daemon"
+  fi
+
+  check_xboard_env
+  check_compose_project "NPM" "$NPM_DIR"
+  check_compose_project "Xboard" "$XBOARD_DIR"
+
+  show_port_listener "$NPM_HTTP_PORT"
+  show_port_listener "$NPM_HTTPS_PORT"
+  show_port_listener "$NPM_ADMIN_PORT"
+  show_port_listener "$XBOARD_PORT"
+
+  check_http_port "NPM 管理后台" "$NPM_ADMIN_PORT"
+  check_http_port "Xboard" "$XBOARD_PORT"
+
+  if [ "$FAILURES" -gt 0 ]; then
+    warn "健康检查发现 ${FAILURES} 个问题，下面输出最近日志辅助排查。"
+    show_recent_logs "NPM" "$NPM_DIR" app
+    show_recent_logs "Xboard" "$XBOARD_DIR" xboard
+    exit 1
+  fi
+
+  info "健康检查通过"
+}
+
+main "$@"
