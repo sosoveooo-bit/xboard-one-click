@@ -1012,6 +1012,24 @@ resolve_xboard_admin_path() {
     return 0
   fi
 
+  if [ ${#COMPOSE_CMD[@]} -gt 0 ] && [ -f "$XBOARD_DIR/compose.yaml" ]; then
+    XBOARD_ADMIN_PATH="$(run_compose "$XBOARD_DIR" exec -T xboard php -r '
+require "/www/vendor/autoload.php";
+$app = require "/www/bootstrap/app.php";
+$kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
+$kernel->bootstrap();
+echo admin_setting("secure_path", admin_setting("frontend_admin_path", hash("crc32b", config("app.key"))));
+' 2>/dev/null | tr -d '\r' | awk 'NF {value=$0} END {print value}' || true)"
+    case "$XBOARD_ADMIN_PATH" in
+      *[!A-Za-z0-9_-]*|"")
+        XBOARD_ADMIN_PATH=""
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  fi
+
   XBOARD_ADMIN_PATH="$(python3 - "$XBOARD_DIR/.env" <<'PY'
 from pathlib import Path
 import binascii
