@@ -49,8 +49,13 @@ ensure_git() {
 prepare_repo() {
   if [ -d "$INSTALL_DIR/.git" ]; then
     log "检测到已有目录，更新到最新代码: $INSTALL_DIR"
+    if run_privileged git -C "$INSTALL_DIR" remote get-url origin >/dev/null 2>&1; then
+      run_privileged git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL"
+    else
+      run_privileged git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
+    fi
     run_privileged git -C "$INSTALL_DIR" fetch origin "$BRANCH" --depth 1
-    run_privileged git -C "$INSTALL_DIR" checkout "$BRANCH"
+    run_privileged git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
     run_privileged git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
     return 0
   fi
@@ -70,7 +75,7 @@ main() {
   prepare_repo
 
   log "开始执行交互式安装"
-  run_privileged chmod +x "$INSTALL_DIR/install.sh" "$INSTALL_DIR/update.sh" "$INSTALL_DIR/uninstall.sh" "$INSTALL_DIR/menu.sh" "$INSTALL_DIR/bootstrap.sh" "$INSTALL_DIR/firewall.sh" "$INSTALL_DIR/backup.sh" "$INSTALL_DIR/restore.sh" "$INSTALL_DIR/healthcheck.sh"
+  run_privileged chmod +x "$INSTALL_DIR/install.sh" "$INSTALL_DIR/update.sh" "$INSTALL_DIR/uninstall.sh" "$INSTALL_DIR/menu.sh" "$INSTALL_DIR/bootstrap.sh" "$INSTALL_DIR/firewall.sh" "$INSTALL_DIR/backup.sh" "$INSTALL_DIR/restore.sh" "$INSTALL_DIR/healthcheck.sh" "$INSTALL_DIR/repair.sh"
 
   if [ "$(id -u)" -eq 0 ]; then
     exec bash "$INSTALL_DIR/install.sh" --interactive
