@@ -955,6 +955,13 @@ wait_for_xboard_redis() {
   die "Xboard 内置 Redis 未能及时启动，已停止安装。"
 }
 
+refresh_xboard_runtime() {
+  log "刷新 Xboard 缓存并重启容器以加载后台路由"
+  run_compose "$XBOARD_DIR" exec -T xboard php artisan optimize:clear || warn "Xboard 缓存清理失败，继续尝试重启容器"
+  run_compose "$XBOARD_DIR" restart xboard
+  wait_for_xboard_redis
+}
+
 install_xboard() {
   local env_was_empty=0
   local env_needs_install=0
@@ -1001,6 +1008,7 @@ install_xboard() {
 
   log "确认 Xboard 维持启动状态"
   run_compose "$XBOARD_DIR" up -d
+  refresh_xboard_runtime
 
   log "验证 Xboard 实际对外端口映射"
   run_compose "$XBOARD_DIR" port xboard 7001

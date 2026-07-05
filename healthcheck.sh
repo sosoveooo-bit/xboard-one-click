@@ -17,6 +17,7 @@ NPM_HTTP_PORT="${NPM_HTTP_PORT:-}"
 NPM_HTTPS_PORT="${NPM_HTTPS_PORT:-}"
 NPM_ADMIN_PORT="${NPM_ADMIN_PORT:-}"
 XBOARD_PORT="${XBOARD_PORT:-}"
+XBOARD_ADMIN_PATH=""
 COMPOSE_CMD=()
 FAILURES=0
 
@@ -181,6 +182,69 @@ check_xboard_http_port() {
   esac
 }
 
+resolve_xboard_admin_path() {
+  XBOARD_ADMIN_PATH=""
+
+  if [ ${#COMPOSE_CMD[@]} -eq 0 ] || ! has_compose_file "$XBOARD_DIR"; then
+    return 1
+  fi
+
+  XBOARD_ADMIN_PATH="$(run_compose "$XBOARD_DIR" exec -T xboard php -r '
+require "/www/vendor/autoload.php";
+$app = require "/www/bootstrap/app.php";
+$kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
+$kernel->bootstrap();
+echo admin_setting("secure_path", admin_setting("frontend_admin_path", hash("crc32b", config("app.key"))));
+' 2>/dev/null | tr -d '\r' | awk 'NF {value=$0} END {print value}' || true)"
+
+  case "$XBOARD_ADMIN_PATH" in
+    *[!A-Za-z0-9_-]*|"")
+      XBOARD_ADMIN_PATH=""
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+check_xboard_admin_path() {
+  local port="$1"
+  local http_code
+  local https_code
+
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "未安装 curl，跳过 Xboard 管理面板路径检查"
+    return
+  fi
+
+  if ! resolve_xboard_admin_path; then
+    fail "无法从 Xboard 运行环境解析管理面板路径，请执行: cd $SCRIPT_DIR && ./repair.sh"
+    return
+  fi
+
+  http_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:${port}/${XBOARD_ADMIN_PATH}" 2>/dev/null || true)"
+  case "$http_code" in
+    2*|3*)
+      info "Xboard 管理面板 HTTP 检查通过: http://127.0.0.1:${port}/${XBOARD_ADMIN_PATH} (${http_code})"
+      return
+      ;;
+  esac
+
+  https_code="$(curl -ksS -o /dev/null -w '%{http_code}' --max-time 8 "https://127.0.0.1:${port}/${XBOARD_ADMIN_PATH}" 2>/dev/null || true)"
+  case "$https_code" in
+    2*|3*)
+      info "Xboard 管理面板 HTTPS 检查通过: https://127.0.0.1:${port}/${XBOARD_ADMIN_PATH} (${https_code})；HTTP 返回 ${http_code:-no-response}"
+      ;;
+    *)
+      if [ "$http_code" = "404" ] || [ "$https_code" = "404" ]; then
+        fail "Xboard 管理面板路径返回 404: /${XBOARD_ADMIN_PATH}。请执行菜单 19 或运行: cd $SCRIPT_DIR && ./repair.sh"
+        return
+      fi
+      fail "Xboard 管理面板路径检查失败: path=/${XBOARD_ADMIN_PATH}, http=${http_code:-no-response}, https=${https_code:-no-response}"
+      ;;
+  esac
+}
+
 check_xboard_env() {
   local env_file="$XBOARD_DIR/.env"
   local db_connection=""
@@ -277,6 +341,7 @@ main() {
 
   check_http_port "NPM 管理后台" "$NPM_ADMIN_PORT"
   check_xboard_http_port "$XBOARD_PORT"
+  check_xboard_admin_path "$XBOARD_PORT"
 
   if [ "$FAILURES" -gt 0 ]; then
     warn "健康检查发现 ${FAILURES} 个问题，下面输出最近日志辅助排查。"
