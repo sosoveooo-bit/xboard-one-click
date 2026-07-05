@@ -986,6 +986,7 @@ install_xboard() {
     mark_xboard_uninstalled
     log "在已启动的 Xboard 容器内执行初始化（SQLite + 内置 Redis）"
     run_compose "$XBOARD_DIR" exec -T \
+      -e INSTALLED= \
       -e ENABLE_SQLITE=true \
       -e ENABLE_REDIS=true \
       -e ADMIN_ACCOUNT="$XBOARD_ADMIN_EMAIL" \
