@@ -965,6 +965,7 @@ SSL 建议：
 - NPM 后台: http://${DETECTED_SERVER_IP}:${NPM_ADMIN_PORT}
 - Xboard 首页: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}
 - Xboard 管理面板: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}
+- 如果 Xboard 直连端口提示 "plain HTTP request was sent to HTTPS port"，请改用 https://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}
 EOF
 }
 
@@ -994,6 +995,7 @@ print_summary() {
 - NPM 管理后台: http://${DETECTED_SERVER_IP}:${NPM_ADMIN_PORT}
 - Xboard 首页: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}
 - Xboard 管理面板: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}
+- 如果 Xboard 直连端口提示 "plain HTTP request was sent to HTTPS port"，请改用 https://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}
 
 已尝试放行端口：
 - ${NPM_HTTP_PORT}/tcp

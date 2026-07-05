@@ -598,6 +598,7 @@ show_access_info() {
   echo "- Xboard 首页: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}"
   if [[ -n "$XBOARD_ADMIN_PATH" ]]; then
     echo "- Xboard 管理面板: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}"
+    echo "- 如 Xboard 直连端口提示 plain HTTP request was sent to HTTPS port，请改用: https://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}"
   else
     echo "- Xboard 管理面板: 安装完成后会自动生成安全路径"
   fi

@@ -119,6 +119,7 @@ check_http_port() {
   local label="$1"
   local port="$2"
   local code
+  local https_code
 
   if ! command -v curl >/dev/null 2>&1; then
     warn "未安装 curl，跳过 HTTP 检查: $label"
@@ -131,7 +132,15 @@ check_http_port() {
       info "${label} 本机 HTTP 检查通过: http://127.0.0.1:${port} (${code})"
       ;;
     *)
-      fail "${label} 本机 HTTP 检查失败: http://127.0.0.1:${port} (${code:-no-response})"
+      https_code="$(curl -ksS -o /dev/null -w '%{http_code}' --max-time 8 "https://127.0.0.1:${port}" 2>/dev/null || true)"
+      case "$https_code" in
+        2*|3*)
+          info "${label} 本机 HTTPS 检查通过: https://127.0.0.1:${port} (${https_code})，HTTP 返回 ${code:-no-response}"
+          ;;
+        *)
+          fail "${label} 本机 HTTP/HTTPS 检查失败: http=${code:-no-response}, https=${https_code:-no-response}, port=${port}"
+          ;;
+      esac
       ;;
   esac
 }
