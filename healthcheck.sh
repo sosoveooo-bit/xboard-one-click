@@ -145,6 +145,42 @@ check_http_port() {
   esac
 }
 
+check_xboard_http_port() {
+  local port="$1"
+  local code
+  local https_code
+
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "未安装 curl，跳过 Xboard HTTP 检查"
+    return
+  fi
+
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:${port}" 2>/dev/null || true)"
+  case "$code" in
+    2*|3*)
+      info "Xboard 本机 HTTP 检查通过: http://127.0.0.1:${port} (${code})"
+      return
+      ;;
+    4*)
+      info "Xboard 端口有 HTTP 响应: http://127.0.0.1:${port} (${code})；根路径返回 4xx 不视为部署失败"
+      return
+      ;;
+  esac
+
+  https_code="$(curl -ksS -o /dev/null -w '%{http_code}' --max-time 8 "https://127.0.0.1:${port}" 2>/dev/null || true)"
+  case "$https_code" in
+    2*|3*)
+      info "Xboard 本机 HTTPS 检查通过: https://127.0.0.1:${port} (${https_code})，HTTP 返回 ${code:-no-response}"
+      ;;
+    4*)
+      info "Xboard 端口有 HTTPS 响应: https://127.0.0.1:${port} (${https_code})；根路径返回 4xx 不视为部署失败"
+      ;;
+    *)
+      fail "Xboard 本机 HTTP/HTTPS 检查失败: http=${code:-no-response}, https=${https_code:-no-response}, port=${port}"
+      ;;
+  esac
+}
+
 check_xboard_env() {
   local env_file="$XBOARD_DIR/.env"
   local db_connection=""
@@ -240,7 +276,7 @@ main() {
   show_port_listener "$XBOARD_PORT"
 
   check_http_port "NPM 管理后台" "$NPM_ADMIN_PORT"
-  check_http_port "Xboard" "$XBOARD_PORT"
+  check_xboard_http_port "$XBOARD_PORT"
 
   if [ "$FAILURES" -gt 0 ]; then
     warn "健康检查发现 ${FAILURES} 个问题，下面输出最近日志辅助排查。"
