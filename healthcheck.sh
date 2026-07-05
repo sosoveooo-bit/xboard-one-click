@@ -138,6 +138,8 @@ check_http_port() {
 
 check_xboard_env() {
   local env_file="$XBOARD_DIR/.env"
+  local db_connection=""
+  local db_database=""
   local redis_host=""
   local redis_port=""
 
@@ -149,7 +151,14 @@ check_xboard_env() {
   info "Xboard .env 存在且非空"
   grep -q '^APP_KEY=.' "$env_file" || fail "Xboard .env 缺少 APP_KEY 或 APP_KEY 为空"
   grep -q '^DB_CONNECTION=.' "$env_file" || fail "Xboard .env 缺少 DB_CONNECTION"
+  grep -q '^DB_DATABASE=.' "$env_file" || fail "Xboard .env 缺少 DB_DATABASE"
   grep -q '^REDIS_HOST=.' "$env_file" || fail "Xboard .env 缺少 REDIS_HOST"
+
+  db_connection="$(awk -F= '$1=="DB_CONNECTION" {print $2; exit}' "$env_file")"
+  db_database="$(awk -F= '$1=="DB_DATABASE" {print $2; exit}' "$env_file")"
+  if [ "$db_connection" != "sqlite" ] || [ "$db_database" != ".docker/.data/database.sqlite" ]; then
+    fail "Xboard SQLite 配置应为 DB_CONNECTION=sqlite 且 DB_DATABASE=.docker/.data/database.sqlite，当前为 DB_CONNECTION=${db_connection:-空}, DB_DATABASE=${db_database:-空}"
+  fi
 
   redis_host="$(awk -F= '$1=="REDIS_HOST" {print $2; exit}' "$env_file")"
   redis_port="$(awk -F= '$1=="REDIS_PORT" {print $2; exit}' "$env_file")"

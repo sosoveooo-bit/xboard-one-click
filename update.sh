@@ -89,7 +89,7 @@ restore_xboard_env() {
 ensure_xboard_builtin_redis_config() {
   local env_file="$XBOARD_DIR/.env"
 
-  [ -s "$env_file" ] || die "Xboard .env 不存在或为空，无法修正 Redis 配置。"
+  [ -s "$env_file" ] || die "Xboard .env 不存在或为空，无法修正 SQLite/Redis 配置。"
 
   python3 - "$env_file" <<'PY'
 from pathlib import Path
@@ -97,6 +97,8 @@ import sys
 
 path = Path(sys.argv[1])
 updates = {
+    "DB_CONNECTION": "sqlite",
+    "DB_DATABASE": ".docker/.data/database.sqlite",
     "REDIS_HOST": "/data/redis.sock",
     "REDIS_PORT": "0",
     "REDIS_PASSWORD": "null",
@@ -118,7 +120,7 @@ for key, value in updates.items():
 path.write_text("\n".join(out).rstrip("\n") + "\n")
 PY
 
-  log "已修正 Xboard 内置 Redis 配置为 /data/redis.sock"
+  log "已修正 Xboard SQLite/Redis 配置"
 }
 
 run_pre_update_backup() {
