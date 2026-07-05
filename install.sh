@@ -15,6 +15,7 @@ DEFAULT_NPM_HTTPS_PORT=443
 DEFAULT_NPM_ADMIN_PORT=81
 DEFAULT_XBOARD_PORT=7001
 DEFAULT_XBOARD_ADMIN_EMAIL="admin@demo.com"
+DEFAULT_XBOARD_ADMIN_PASSWORD=""
 DEFAULT_EXTRA_NPM_HTTPS_PORTS=""
 DEFAULT_XBOARD_REPO="https://github.com/cedar2025/Xboard"
 DEFAULT_XBOARD_BRANCH="compose"
@@ -45,6 +46,7 @@ INPUT_CLOUD_FIREWALL_SOURCE_CIDR="${CLOUD_FIREWALL_SOURCE_CIDR:-}"
 INPUT_CLOUD_FIREWALL_RULE_PREFIX="${CLOUD_FIREWALL_RULE_PREFIX:-}"
 INPUT_XBOARD_PORT="${XBOARD_PORT:-}"
 INPUT_XBOARD_ADMIN_EMAIL="${XBOARD_ADMIN_EMAIL:-}"
+INPUT_XBOARD_ADMIN_PASSWORD="${XBOARD_ADMIN_PASSWORD:-}"
 INPUT_XBOARD_REPO="${XBOARD_REPO:-}"
 INPUT_XBOARD_BRANCH="${XBOARD_BRANCH:-}"
 INPUT_ENABLE_FIREWALL_OPEN="${ENABLE_FIREWALL_OPEN:-}"
@@ -71,6 +73,7 @@ CLOUD_FIREWALL_SOURCE_CIDR="${CLOUD_FIREWALL_SOURCE_CIDR:-}"
 CLOUD_FIREWALL_RULE_PREFIX="${CLOUD_FIREWALL_RULE_PREFIX:-}"
 XBOARD_PORT="${XBOARD_PORT:-}"
 XBOARD_ADMIN_EMAIL="${XBOARD_ADMIN_EMAIL:-}"
+XBOARD_ADMIN_PASSWORD="${XBOARD_ADMIN_PASSWORD:-}"
 XBOARD_REPO="${XBOARD_REPO:-}"
 XBOARD_BRANCH="${XBOARD_BRANCH:-}"
 ENABLE_FIREWALL_OPEN="${ENABLE_FIREWALL_OPEN:-}"
@@ -206,6 +209,7 @@ restore_input_overrides() {
   [ -z "$INPUT_CLOUD_FIREWALL_RULE_PREFIX" ] || CLOUD_FIREWALL_RULE_PREFIX="$INPUT_CLOUD_FIREWALL_RULE_PREFIX"
   [ -z "$INPUT_XBOARD_PORT" ] || XBOARD_PORT="$INPUT_XBOARD_PORT"
   [ -z "$INPUT_XBOARD_ADMIN_EMAIL" ] || XBOARD_ADMIN_EMAIL="$INPUT_XBOARD_ADMIN_EMAIL"
+  [ -z "$INPUT_XBOARD_ADMIN_PASSWORD" ] || XBOARD_ADMIN_PASSWORD="$INPUT_XBOARD_ADMIN_PASSWORD"
   [ -z "$INPUT_XBOARD_REPO" ] || XBOARD_REPO="$INPUT_XBOARD_REPO"
   [ -z "$INPUT_XBOARD_BRANCH" ] || XBOARD_BRANCH="$INPUT_XBOARD_BRANCH"
   [ -z "$INPUT_ENABLE_FIREWALL_OPEN" ] || ENABLE_FIREWALL_OPEN="$INPUT_ENABLE_FIREWALL_OPEN"
@@ -237,6 +241,7 @@ apply_defaults() {
   EXTRA_NPM_HTTPS_PORTS="${EXTRA_NPM_HTTPS_PORTS:-${DEFAULT_EXTRA_NPM_HTTPS_PORTS}}"
   XBOARD_PORT="${XBOARD_PORT:-${DEFAULT_XBOARD_PORT}}"
   XBOARD_ADMIN_EMAIL="${XBOARD_ADMIN_EMAIL:-${DEFAULT_XBOARD_ADMIN_EMAIL}}"
+  XBOARD_ADMIN_PASSWORD="${XBOARD_ADMIN_PASSWORD:-${DEFAULT_XBOARD_ADMIN_PASSWORD}}"
   XBOARD_REPO="${XBOARD_REPO:-${DEFAULT_XBOARD_REPO}}"
   XBOARD_BRANCH="${XBOARD_BRANCH:-${DEFAULT_XBOARD_BRANCH}}"
   ENABLE_FIREWALL_OPEN="${ENABLE_FIREWALL_OPEN:-${DEFAULT_ENABLE_FIREWALL_OPEN}}"
@@ -341,6 +346,13 @@ validate_email() {
   [[ "$1" == *"@"* ]]
 }
 
+validate_password_value() {
+  local value="$1"
+  [ -z "$value" ] && return 0
+  [ "${#value}" -ge 8 ] || return 1
+  [[ "$value" =~ ^[A-Za-z0-9._@%+=:,/-]+$ ]]
+}
+
 validate_config() {
   local port
   for port in "$NPM_HTTP_PORT" "$NPM_HTTPS_PORT" "$NPM_ADMIN_PORT" "$XBOARD_PORT"; do
@@ -357,6 +369,7 @@ validate_config() {
   validate_extra_https_ports
 
   validate_email "$XBOARD_ADMIN_EMAIL" || die "XBOARD_ADMIN_EMAIL 格式看起来不对: $XBOARD_ADMIN_EMAIL"
+  validate_password_value "$XBOARD_ADMIN_PASSWORD" || die "XBOARD_ADMIN_PASSWORD 至少 8 位，且只能包含字母、数字和 ._@%+=:,/-"
 }
 
 prompt_value() {
@@ -423,6 +436,7 @@ CLOUD_FIREWALL_SOURCE_CIDR=${CLOUD_FIREWALL_SOURCE_CIDR}
 CLOUD_FIREWALL_RULE_PREFIX=${CLOUD_FIREWALL_RULE_PREFIX}
 XBOARD_PORT=${XBOARD_PORT}
 XBOARD_ADMIN_EMAIL=${XBOARD_ADMIN_EMAIL}
+XBOARD_ADMIN_PASSWORD=${XBOARD_ADMIN_PASSWORD}
 XBOARD_REPO=${XBOARD_REPO}
 XBOARD_BRANCH=${XBOARD_BRANCH}
 ENABLE_FIREWALL_OPEN=${ENABLE_FIREWALL_OPEN}
@@ -962,6 +976,40 @@ refresh_xboard_runtime() {
   wait_for_xboard_redis
 }
 
+generate_xboard_admin_password() {
+  python3 - <<'PY'
+import secrets
+import string
+
+alphabet = string.ascii_letters + string.digits
+print("".join(secrets.choice(alphabet) for _ in range(18)))
+PY
+}
+
+ensure_xboard_admin_password() {
+  if [ -z "$XBOARD_ADMIN_PASSWORD" ]; then
+    XBOARD_ADMIN_PASSWORD="$(generate_xboard_admin_password)"
+    log "已生成 Xboard 管理员密码，并将保存到 deploy.env 供菜单查看"
+  fi
+
+  validate_password_value "$XBOARD_ADMIN_PASSWORD" || die "XBOARD_ADMIN_PASSWORD 至少 8 位，且只能包含字母、数字和 ._@%+=:,/-"
+}
+
+persist_xboard_admin_password() {
+  if [ "$AUTO_WRITE_DEPLOY_ENV" = "1" ]; then
+    write_deploy_env
+  else
+    warn "AUTO_WRITE_DEPLOY_ENV=0，Xboard 管理员密码未写入 deploy.env，菜单 4 将无法长期显示"
+  fi
+}
+
+set_xboard_admin_password() {
+  ensure_xboard_admin_password
+  log "设置 Xboard 管理员密码"
+  run_compose "$XBOARD_DIR" exec -T xboard php artisan reset:password "$XBOARD_ADMIN_EMAIL" "$XBOARD_ADMIN_PASSWORD"
+  persist_xboard_admin_password
+}
+
 install_xboard() {
   local env_was_empty=0
   local env_needs_install=0
@@ -1002,8 +1050,13 @@ install_xboard() {
       run_compose "$XBOARD_DIR" logs --tail=120 xboard || true
       die "Xboard 初始化后仍缺少必要数据库表，请查看上方日志。"
     fi
+    set_xboard_admin_password
   else
     log "检测到现有 SQLite 数据，跳过 Xboard 初始化。如需强制重装可传入 FORCE_XBOARD_INSTALL=1"
+    if [ -z "$XBOARD_ADMIN_PASSWORD" ]; then
+      warn "本地未保存 Xboard 管理员密码，将生成新密码并重置管理员账号，方便菜单 4 展示"
+      set_xboard_admin_password
+    fi
   fi
 
   log "确认 Xboard 维持启动状态"
@@ -1133,6 +1186,7 @@ print_summary() {
 - 云防火墙提供商: ${CLOUD_FIREWALL_PROVIDER:-auto}
 - Xboard 对外端口: ${XBOARD_PORT}
 - Xboard 管理员邮箱: ${XBOARD_ADMIN_EMAIL}
+- Xboard 管理员密码: ${XBOARD_ADMIN_PASSWORD:-未保存}
 
 目录：
 - NPM: ${NPM_DIR}
@@ -1146,6 +1200,8 @@ print_summary() {
 - NPM 管理后台: http://${DETECTED_SERVER_IP}:${NPM_ADMIN_PORT}
 - Xboard 首页: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}
 - Xboard 管理面板: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}
+- Xboard 登录账号: ${XBOARD_ADMIN_EMAIL}
+- Xboard 登录密码: ${XBOARD_ADMIN_PASSWORD:-未保存}
 - 如果 Xboard 直连端口提示 "plain HTTP request was sent to HTTPS port"，请改用 https://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}
 
 已尝试放行端口：

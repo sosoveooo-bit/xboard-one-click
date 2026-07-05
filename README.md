@@ -33,6 +33,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/slobys/xboard-one-click/main
 - Xboard 对外端口
 - Xboard 管理员邮箱
 
+Xboard 管理员密码默认会自动生成并保存到本机 `deploy.env`，菜单选项 `4` 会展示该密码。
+
 ## 管理菜单
 
 安装完成后，可以随时调出菜单：
@@ -145,6 +147,7 @@ curl -I http://127.0.0.1:你的Xboard端口
 脚本会输出：
 - **Xboard 首页**
 - **Xboard 管理面板**
+- **Xboard 管理员账号和脚本保存的密码**
 - **NPM 管理后台**
 
 > 注意：Xboard 后台不是根路径，请以脚本输出的 **Xboard 管理面板** 链接为准。

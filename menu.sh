@@ -33,6 +33,7 @@ NPM_ADMIN_PORT="${NPM_ADMIN_PORT:-}"
 EXTRA_NPM_HTTPS_PORTS="${EXTRA_NPM_HTTPS_PORTS:-}"
 XBOARD_PORT="${XBOARD_PORT:-}"
 XBOARD_ADMIN_EMAIL="${XBOARD_ADMIN_EMAIL:-}"
+XBOARD_ADMIN_PASSWORD="${XBOARD_ADMIN_PASSWORD:-}"
 
 info() { echo -e "${BLUE}[INFO]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
@@ -57,6 +58,7 @@ apply_defaults() {
   EXTRA_NPM_HTTPS_PORTS="${EXTRA_NPM_HTTPS_PORTS:-${DEFAULT_EXTRA_NPM_HTTPS_PORTS}}"
   XBOARD_PORT="${XBOARD_PORT:-${DEFAULT_XBOARD_PORT}}"
   XBOARD_ADMIN_EMAIL="${XBOARD_ADMIN_EMAIL:-${DEFAULT_XBOARD_ADMIN_EMAIL}}"
+  XBOARD_ADMIN_PASSWORD="${XBOARD_ADMIN_PASSWORD:-}"
 }
 
 load_deploy_env() {
@@ -604,6 +606,11 @@ show_access_info() {
   echo "- 云防火墙提供商: ${CLOUD_FIREWALL_PROVIDER:-auto}"
   echo "- Xboard 对外端口: ${XBOARD_PORT}"
   echo "- Xboard 管理员邮箱: ${XBOARD_ADMIN_EMAIL}"
+  if [[ -n "$XBOARD_ADMIN_PASSWORD" ]]; then
+    echo "- Xboard 管理员密码: ${XBOARD_ADMIN_PASSWORD}"
+  else
+    echo "- Xboard 管理员密码: 未保存（老版本安装无法反查；运行 bash \"${BASE_DIR}/repair.sh\" 可生成并保存新密码）"
+  fi
   echo
   info "目录"
   echo "- 项目目录: ${BASE_DIR}"
@@ -616,6 +623,12 @@ show_access_info() {
   echo "- Xboard 首页: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}"
   if [[ -n "$XBOARD_ADMIN_PATH" ]]; then
     echo "- Xboard 管理面板: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}"
+    echo "- Xboard 登录账号: ${XBOARD_ADMIN_EMAIL}"
+    if [[ -n "$XBOARD_ADMIN_PASSWORD" ]]; then
+      echo "- Xboard 登录密码: ${XBOARD_ADMIN_PASSWORD}"
+    else
+      echo "- Xboard 登录密码: 未保存"
+    fi
     echo "- 如 Xboard 直连端口提示 plain HTTP request was sent to HTTPS port，请改用: https://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}"
   else
     echo "- Xboard 管理面板: 安装完成后会自动生成安全路径"
