@@ -86,6 +86,41 @@ restore_xboard_env() {
   log "已恢复 Xboard .env"
 }
 
+ensure_xboard_builtin_redis_config() {
+  local env_file="$XBOARD_DIR/.env"
+
+  [ -s "$env_file" ] || die "Xboard .env 不存在或为空，无法修正 Redis 配置。"
+
+  python3 - "$env_file" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+updates = {
+    "REDIS_HOST": "/data/redis.sock",
+    "REDIS_PORT": "0",
+    "REDIS_PASSWORD": "null",
+}
+lines = path.read_text().splitlines()
+seen = set()
+out = []
+for line in lines:
+    if "=" in line and not line.lstrip().startswith("#"):
+        key = line.split("=", 1)[0]
+        if key in updates:
+            out.append(f"{key}={updates[key]}")
+            seen.add(key)
+            continue
+    out.append(line)
+for key, value in updates.items():
+    if key not in seen:
+        out.append(f"{key}={value}")
+path.write_text("\n".join(out).rstrip("\n") + "\n")
+PY
+
+  log "已修正 Xboard 内置 Redis 配置为 /data/redis.sock"
+}
+
 run_pre_update_backup() {
   [ "$PRE_UPDATE_BACKUP" = "1" ] || {
     log "已跳过更新前备份（PRE_UPDATE_BACKUP=${PRE_UPDATE_BACKUP}）"
@@ -261,6 +296,7 @@ main() {
   git -C "$XBOARD_DIR" checkout "$XBOARD_BRANCH"
   git -C "$XBOARD_DIR" reset --hard "origin/$XBOARD_BRANCH"
   restore_xboard_env
+  ensure_xboard_builtin_redis_config
   ensure_xboard_port_mapping
 
   log "更新 Xboard 镜像并重建容器"

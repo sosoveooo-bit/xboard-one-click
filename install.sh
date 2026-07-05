@@ -745,9 +745,9 @@ LOG_CHANNEL=stack
 DB_CONNECTION=sqlite
 DB_DATABASE=/www/.docker/.data/database.sqlite
 
-REDIS_HOST=127.0.0.1
+REDIS_HOST=/data/redis.sock
 REDIS_PASSWORD=null
-REDIS_PORT=6379
+REDIS_PORT=0
 
 BROADCAST_DRIVER=log
 CACHE_DRIVER=redis
@@ -778,9 +778,9 @@ updates = {
     'APP_URL': f'http://localhost:{port}',
     'DB_CONNECTION': 'sqlite',
     'DB_DATABASE': '/www/.docker/.data/database.sqlite',
-    'REDIS_HOST': '127.0.0.1',
+    'REDIS_HOST': '/data/redis.sock',
     'REDIS_PASSWORD': 'null',
-    'REDIS_PORT': '6379',
+    'REDIS_PORT': '0',
     'BROADCAST_DRIVER': 'log',
     'CACHE_DRIVER': 'redis',
     'QUEUE_CONNECTION': 'redis',

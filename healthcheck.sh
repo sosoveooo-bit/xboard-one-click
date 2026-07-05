@@ -138,6 +138,8 @@ check_http_port() {
 
 check_xboard_env() {
   local env_file="$XBOARD_DIR/.env"
+  local redis_host=""
+  local redis_port=""
 
   if [ ! -s "$env_file" ]; then
     fail "Xboard .env 不存在或为空: $env_file"
@@ -148,6 +150,12 @@ check_xboard_env() {
   grep -q '^APP_KEY=.' "$env_file" || fail "Xboard .env 缺少 APP_KEY 或 APP_KEY 为空"
   grep -q '^DB_CONNECTION=.' "$env_file" || fail "Xboard .env 缺少 DB_CONNECTION"
   grep -q '^REDIS_HOST=.' "$env_file" || fail "Xboard .env 缺少 REDIS_HOST"
+
+  redis_host="$(awk -F= '$1=="REDIS_HOST" {print $2; exit}' "$env_file")"
+  redis_port="$(awk -F= '$1=="REDIS_PORT" {print $2; exit}' "$env_file")"
+  if [ "$redis_host" != "/data/redis.sock" ] || [ "$redis_port" != "0" ]; then
+    fail "Xboard 内置 Redis 配置应为 REDIS_HOST=/data/redis.sock 且 REDIS_PORT=0，当前为 REDIS_HOST=${redis_host:-空}, REDIS_PORT=${redis_port:-空}"
+  fi
 }
 
 show_recent_logs() {
