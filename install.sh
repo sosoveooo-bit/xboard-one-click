@@ -830,9 +830,77 @@ PY
 }
 
 should_install_xboard() {
+  local env_was_empty="${1:-0}"
+
   [ "$FORCE_XBOARD_INSTALL" = "1" ] && return 0
+  [ "$env_was_empty" = "1" ] && return 0
+  [ ! -s "$XBOARD_DIR/.env" ] && return 0
+  xboard_env_is_installed || return 0
   [ ! -s "$XBOARD_DIR/.docker/.data/database.sqlite" ] && return 0
+  xboard_sqlite_has_required_tables || return 0
   return 1
+}
+
+xboard_env_is_installed() {
+  local env_file="$XBOARD_DIR/.env"
+
+  [ -s "$env_file" ] || return 1
+  grep -q '^APP_KEY=base64:' "$env_file" || return 1
+  grep -qi '^INSTALLED=true' "$env_file" || return 1
+}
+
+xboard_sqlite_has_required_tables() {
+  run_compose "$XBOARD_DIR" exec -T xboard php -r '
+$db = "/www/.docker/.data/database.sqlite";
+if (!is_file($db) || filesize($db) === 0) {
+    exit(1);
+}
+try {
+    $pdo = new PDO("sqlite:" . $db);
+    $stmt = $pdo->query("SELECT name FROM sqlite_master WHERE type = '\''table'\'' AND name = '\''v2_plugins'\''");
+    exit($stmt && $stmt->fetchColumn() ? 0 : 2);
+} catch (Throwable $e) {
+    exit(3);
+}
+' >/dev/null 2>&1
+}
+
+mark_xboard_uninstalled() {
+  local env_file="$XBOARD_DIR/.env"
+
+  python3 - "$env_file" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+lines = path.read_text().splitlines() if path.exists() else []
+seen = False
+out = []
+for line in lines:
+    if "=" in line and not line.lstrip().startswith("#") and line.split("=", 1)[0] == "INSTALLED":
+        out.append("INSTALLED=false")
+        seen = True
+    else:
+        out.append(line)
+if not seen:
+    out.append("INSTALLED=false")
+path.write_text("\n".join(out).rstrip("\n") + "\n")
+PY
+}
+
+archive_xboard_sqlite() {
+  local db="$XBOARD_DIR/.docker/.data/database.sqlite"
+  local ts
+
+  [ -s "$db" ] || [ -e "${db}-wal" ] || [ -e "${db}-shm" ] || return 0
+  ts="$(date +%Y%m%d%H%M%S)"
+  warn "检测到 Xboard SQLite 数据库需要重新初始化，旧库将备份为 database.sqlite.broken-${ts}"
+
+  for suffix in "" "-wal" "-shm"; do
+    if [ -e "${db}${suffix}" ]; then
+      mv "${db}${suffix}" "${db}${suffix}.broken-${ts}"
+    fi
+  done
 }
 
 wait_for_xboard_redis() {
@@ -855,21 +923,44 @@ wait_for_xboard_redis() {
 }
 
 install_xboard() {
+  local env_was_empty=0
+  local env_needs_install=0
+
+  [ ! -s "$XBOARD_DIR/.env" ] && env_was_empty=1
   clone_or_update_xboard
   ensure_xboard_port_mapping
   prepare_xboard_env
+  xboard_env_is_installed || env_needs_install=1
 
   log "先启动 Xboard 容器，确保内置 Redis 正常就绪"
   run_compose "$XBOARD_DIR" up -d
   wait_for_xboard_redis
 
-  if should_install_xboard; then
+  if should_install_xboard "$env_was_empty"; then
+    local needs_sqlite_archive=0
+    if [ "$FORCE_XBOARD_INSTALL" = "1" ] || [ "$env_was_empty" = "1" ] || [ "$env_needs_install" = "1" ] || { [ -s "$XBOARD_DIR/.docker/.data/database.sqlite" ] && ! xboard_sqlite_has_required_tables; }; then
+      needs_sqlite_archive=1
+    fi
+
+    if [ "$needs_sqlite_archive" = "1" ] && { [ -s "$XBOARD_DIR/.docker/.data/database.sqlite" ] || [ -e "$XBOARD_DIR/.docker/.data/database.sqlite-wal" ] || [ -e "$XBOARD_DIR/.docker/.data/database.sqlite-shm" ]; }; then
+      log "停止 Xboard 容器以安全备份旧 SQLite 数据库"
+      run_compose "$XBOARD_DIR" stop xboard || true
+      archive_xboard_sqlite
+      run_compose "$XBOARD_DIR" up -d
+      wait_for_xboard_redis
+    fi
+
+    mark_xboard_uninstalled
     log "在已启动的 Xboard 容器内执行初始化（SQLite + 内置 Redis）"
     run_compose "$XBOARD_DIR" exec -T \
       -e ENABLE_SQLITE=true \
       -e ENABLE_REDIS=true \
       -e ADMIN_ACCOUNT="$XBOARD_ADMIN_EMAIL" \
       xboard php artisan xboard:install
+    if ! xboard_sqlite_has_required_tables; then
+      run_compose "$XBOARD_DIR" logs --tail=120 xboard || true
+      die "Xboard 初始化后仍缺少必要数据库表，请查看上方日志。"
+    fi
   else
     log "检测到现有 SQLite 数据，跳过 Xboard 初始化。如需强制重装可传入 FORCE_XBOARD_INSTALL=1"
   fi

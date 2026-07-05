@@ -634,6 +634,15 @@ run_healthcheck() {
   bash "$BASE_DIR/healthcheck.sh"
 }
 
+run_repair() {
+  if [[ ! -f "$BASE_DIR/repair.sh" ]]; then
+    warn "未找到修复脚本: $BASE_DIR/repair.sh"
+    return 1
+  fi
+
+  bash "$BASE_DIR/repair.sh"
+}
+
 run_restore() {
   local archive
 
@@ -762,6 +771,7 @@ show_menu() {
   echo "16. 从备份恢复"
   echo "17. 卸载（保留数据）"
   echo "18. 卸载（删除数据）"
+  echo "19. 一键修复 Xboard 初始化 / 数据库 / 配置"
   echo "0.  退出"
   echo "=========================================="
 }
@@ -844,6 +854,10 @@ main() {
         ;;
       18)
         run_uninstall 1
+        pause
+        ;;
+      19)
+        run_repair
         pause
         ;;
       0)

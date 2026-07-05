@@ -176,6 +176,30 @@ check_xboard_env() {
   fi
 }
 
+check_xboard_database_tables() {
+  if [ ${#COMPOSE_CMD[@]} -eq 0 ] || ! has_compose_file "$XBOARD_DIR"; then
+    return
+  fi
+
+  if run_compose "$XBOARD_DIR" exec -T xboard php -r '
+$db = "/www/.docker/.data/database.sqlite";
+if (!is_file($db) || filesize($db) === 0) {
+    exit(1);
+}
+try {
+    $pdo = new PDO("sqlite:" . $db);
+    $stmt = $pdo->query("SELECT name FROM sqlite_master WHERE type = '\''table'\'' AND name = '\''v2_plugins'\''");
+    exit($stmt && $stmt->fetchColumn() ? 0 : 2);
+} catch (Throwable $e) {
+    exit(3);
+}
+' >/dev/null 2>&1; then
+    info "Xboard SQLite 必要表检查通过"
+  else
+    fail "Xboard SQLite 缺少必要表或数据库损坏，请执行: cd $SCRIPT_DIR && ./repair.sh"
+  fi
+}
+
 show_recent_logs() {
   local label="$1"
   local dir="$2"
@@ -208,6 +232,7 @@ main() {
   check_xboard_env
   check_compose_project "NPM" "$NPM_DIR"
   check_compose_project "Xboard" "$XBOARD_DIR"
+  check_xboard_database_tables
 
   show_port_listener "$NPM_HTTP_PORT"
   show_port_listener "$NPM_HTTPS_PORT"
