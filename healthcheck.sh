@@ -12,11 +12,13 @@ DEFAULT_NPM_HTTP_PORT=80
 DEFAULT_NPM_HTTPS_PORT=443
 DEFAULT_NPM_ADMIN_PORT=81
 DEFAULT_XBOARD_PORT=7001
+DEFAULT_XBOARD_ADMIN_EMAIL="admin@demo.com"
 
 NPM_HTTP_PORT="${NPM_HTTP_PORT:-}"
 NPM_HTTPS_PORT="${NPM_HTTPS_PORT:-}"
 NPM_ADMIN_PORT="${NPM_ADMIN_PORT:-}"
 XBOARD_PORT="${XBOARD_PORT:-}"
+XBOARD_ADMIN_EMAIL="${XBOARD_ADMIN_EMAIL:-}"
 XBOARD_ADMIN_PATH=""
 COMPOSE_CMD=()
 FAILURES=0
@@ -46,6 +48,7 @@ load_deploy_env() {
   NPM_HTTPS_PORT="${NPM_HTTPS_PORT:-${DEFAULT_NPM_HTTPS_PORT}}"
   NPM_ADMIN_PORT="${NPM_ADMIN_PORT:-${DEFAULT_NPM_ADMIN_PORT}}"
   XBOARD_PORT="${XBOARD_PORT:-${DEFAULT_XBOARD_PORT}}"
+  XBOARD_ADMIN_EMAIL="${XBOARD_ADMIN_EMAIL:-${DEFAULT_XBOARD_ADMIN_EMAIL}}"
 }
 
 init_compose() {
@@ -300,6 +303,36 @@ try {
   fi
 }
 
+check_xboard_admin_user() {
+  if [ ${#COMPOSE_CMD[@]} -eq 0 ] || ! has_compose_file "$XBOARD_DIR"; then
+    return
+  fi
+
+  if run_compose "$XBOARD_DIR" exec -T -e XBOARD_ADMIN_EMAIL="$XBOARD_ADMIN_EMAIL" xboard php -r '
+$db = "/www/.docker/.data/database.sqlite";
+$email = strtolower(trim((string)getenv("XBOARD_ADMIN_EMAIL")));
+if (!is_file($db) || filesize($db) === 0 || $email === "") {
+    exit(1);
+}
+try {
+    $pdo = new PDO("sqlite:" . $db);
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM v2_user WHERE lower(email) = :email AND is_admin = 1");
+    $stmt->execute([":email" => $email]);
+    if ((int)$stmt->fetchColumn() > 0) {
+        exit(0);
+    }
+    $count = (int)$pdo->query("SELECT COUNT(*) FROM v2_user WHERE is_admin = 1")->fetchColumn();
+    exit($count > 0 ? 2 : 3);
+} catch (Throwable $e) {
+    exit(4);
+}
+' >/dev/null 2>&1; then
+    info "Xboard 管理员账号检查通过: ${XBOARD_ADMIN_EMAIL}"
+  else
+    fail "Xboard 数据库中未找到 deploy.env 配置的管理员账号: ${XBOARD_ADMIN_EMAIL}。请执行: cd $SCRIPT_DIR && bash repair.sh"
+  fi
+}
+
 show_recent_logs() {
   local label="$1"
   local dir="$2"
@@ -333,6 +366,7 @@ main() {
   check_compose_project "NPM" "$NPM_DIR"
   check_compose_project "Xboard" "$XBOARD_DIR"
   check_xboard_database_tables
+  check_xboard_admin_user
 
   show_port_listener "$NPM_HTTP_PORT"
   show_port_listener "$NPM_HTTPS_PORT"

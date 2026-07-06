@@ -1012,8 +1012,42 @@ persist_xboard_admin_password() {
 
 set_xboard_admin_password() {
   ensure_xboard_admin_password
-  log "设置 Xboard 管理员密码"
-  run_compose "$XBOARD_DIR" exec -T xboard php artisan reset:password "$XBOARD_ADMIN_EMAIL" "$XBOARD_ADMIN_PASSWORD"
+  log "确认 Xboard 管理员账号和密码"
+  run_compose "$XBOARD_DIR" exec -T \
+    -e XBOARD_ADMIN_EMAIL="$XBOARD_ADMIN_EMAIL" \
+    -e XBOARD_ADMIN_PASSWORD="$XBOARD_ADMIN_PASSWORD" \
+    xboard php -r '
+require "/www/vendor/autoload.php";
+$app = require "/www/bootstrap/app.php";
+$kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
+$kernel->bootstrap();
+
+$email = strtolower(trim((string)getenv("XBOARD_ADMIN_EMAIL")));
+$password = (string)getenv("XBOARD_ADMIN_PASSWORD");
+if ($email === "" || strlen($password) < 8) {
+    fwrite(STDERR, "管理员邮箱为空或密码长度不足\n");
+    exit(1);
+}
+
+$user = App\Models\User::byEmail($email)->first();
+$created = false;
+if (!$user) {
+    $user = new App\Models\User();
+    $user->email = $email;
+    $user->uuid = App\Utils\Helper::guid(true);
+    $user->token = App\Utils\Helper::guid();
+    $created = true;
+}
+
+$user->password = password_hash($password, PASSWORD_DEFAULT);
+$user->password_algo = null;
+$user->password_salt = null;
+$user->is_admin = 1;
+$user->banned = 0;
+$user->save();
+
+echo ($created ? "已创建管理员账号: " : "已重置管理员密码: ") . $email . PHP_EOL;
+'
   persist_xboard_admin_password
 }
 
