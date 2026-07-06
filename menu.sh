@@ -801,7 +801,7 @@ show_menu() {
   echo "      Xboard One Click 管理菜单"
   echo "=========================================="
   echo "1.  安装 / 重新配置（交互式）"
-  echo "2.  更新 Xboard / NPM"
+  echo "2.  安全更新 Xboard / NPM（先备份，失败自动回滚）"
   echo "3.  查看服务状态"
   echo "4.  查看访问信息"
   echo "5.  放行额外端口"

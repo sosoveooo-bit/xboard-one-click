@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 PROJECT_NAME="xboard-one-click-update"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +14,7 @@ DEFAULT_NPM_HTTPS_PORT=443
 DEFAULT_NPM_ADMIN_PORT=81
 DEFAULT_XBOARD_PORT=7001
 DEFAULT_PRE_UPDATE_BACKUP=1
+DEFAULT_AUTO_ROLLBACK_ON_UPDATE_FAIL=1
 
 INPUT_NPM_HTTP_PORT="${NPM_HTTP_PORT:-}"
 INPUT_NPM_HTTPS_PORT="${NPM_HTTPS_PORT:-}"
@@ -22,6 +23,7 @@ INPUT_EXTRA_NPM_HTTPS_PORTS="${EXTRA_NPM_HTTPS_PORTS:-}"
 INPUT_XBOARD_BRANCH="${XBOARD_BRANCH:-}"
 INPUT_XBOARD_PORT="${XBOARD_PORT:-}"
 INPUT_PRE_UPDATE_BACKUP="${PRE_UPDATE_BACKUP:-}"
+INPUT_AUTO_ROLLBACK_ON_UPDATE_FAIL="${AUTO_ROLLBACK_ON_UPDATE_FAIL:-}"
 
 NPM_HTTP_PORT="${NPM_HTTP_PORT:-}"
 NPM_HTTPS_PORT="${NPM_HTTPS_PORT:-}"
@@ -30,8 +32,12 @@ EXTRA_NPM_HTTPS_PORTS="${EXTRA_NPM_HTTPS_PORTS:-}"
 XBOARD_BRANCH="${XBOARD_BRANCH:-}"
 XBOARD_PORT="${XBOARD_PORT:-}"
 PRE_UPDATE_BACKUP="${PRE_UPDATE_BACKUP:-}"
+AUTO_ROLLBACK_ON_UPDATE_FAIL="${AUTO_ROLLBACK_ON_UPDATE_FAIL:-}"
 COMPOSE_CMD=()
 XBOARD_ENV_BACKUP_FILE=""
+PRE_UPDATE_BACKUP_FILE=""
+UPDATE_COMPLETED=0
+ROLLBACK_RUNNING=0
 
 log() {
   printf '[%s] %s\n' "$PROJECT_NAME" "$*"
@@ -39,6 +45,9 @@ log() {
 
 die() {
   printf '[%s][WARN] %s\n' "$PROJECT_NAME" "$*" >&2
+  if declare -F rollback_from_pre_update_backup >/dev/null 2>&1; then
+    rollback_from_pre_update_backup || true
+  fi
   exit 1
 }
 
@@ -56,6 +65,43 @@ cleanup_env_backup() {
   if [ -n "${XBOARD_ENV_BACKUP_FILE:-}" ] && [ -f "$XBOARD_ENV_BACKUP_FILE" ]; then
     rm -f "$XBOARD_ENV_BACKUP_FILE"
   fi
+}
+
+rollback_from_pre_update_backup() {
+  [ "$UPDATE_COMPLETED" = "0" ] || return 0
+  [ "$ROLLBACK_RUNNING" = "0" ] || return 0
+  [ "$AUTO_ROLLBACK_ON_UPDATE_FAIL" = "1" ] || {
+    if [ -n "$PRE_UPDATE_BACKUP_FILE" ]; then
+      log "更新失败，已保留更新前备份，可手动恢复: RESTORE_OVERWRITE=1 bash \"$SCRIPT_DIR/restore.sh\" \"$PRE_UPDATE_BACKUP_FILE\""
+    fi
+    return 0
+  }
+  [ -n "$PRE_UPDATE_BACKUP_FILE" ] || {
+    log "更新失败，但未找到更新前备份，无法自动回滚。"
+    return 0
+  }
+  [ -f "$PRE_UPDATE_BACKUP_FILE" ] || {
+    log "更新失败，但备份包不存在，无法自动回滚: $PRE_UPDATE_BACKUP_FILE"
+    return 0
+  }
+  [ -f "$SCRIPT_DIR/restore.sh" ] || {
+    log "更新失败，但未找到 restore.sh，无法自动回滚。备份包: $PRE_UPDATE_BACKUP_FILE"
+    return 0
+  }
+
+  ROLLBACK_RUNNING=1
+  log "更新失败，开始自动回滚到更新前备份: $PRE_UPDATE_BACKUP_FILE"
+  if (cd / && RESTORE_OVERWRITE=1 bash "$SCRIPT_DIR/restore.sh" "$PRE_UPDATE_BACKUP_FILE"); then
+    log "自动回滚完成。"
+  else
+    log "自动回滚失败，请手动恢复: RESTORE_OVERWRITE=1 bash \"$SCRIPT_DIR/restore.sh\" \"$PRE_UPDATE_BACKUP_FILE\""
+  fi
+}
+
+handle_update_error() {
+  local exit_code="${1:-1}"
+  rollback_from_pre_update_backup || true
+  exit "$exit_code"
 }
 
 backup_xboard_env() {
@@ -102,6 +148,7 @@ updates = {
     "REDIS_HOST": "/data/redis.sock",
     "REDIS_PORT": "0",
     "REDIS_PASSWORD": "null",
+    "ENABLE_AUTO_BACKUP_AND_UPDATE": "false",
 }
 lines = path.read_text().splitlines()
 seen = set()
@@ -124,14 +171,20 @@ PY
 }
 
 run_pre_update_backup() {
+  local backup_dir
+
   [ "$PRE_UPDATE_BACKUP" = "1" ] || {
     log "已跳过更新前备份（PRE_UPDATE_BACKUP=${PRE_UPDATE_BACKUP}）"
     return 0
   }
 
   [ -f "$SCRIPT_DIR/backup.sh" ] || die "未找到备份脚本，无法执行更新前备份: $SCRIPT_DIR/backup.sh"
+  backup_dir="${SCRIPT_DIR}-backups/pre-update"
   log "开始更新前自动备份"
-  BACKUP_DIR="${SCRIPT_DIR}-backups/pre-update" bash "$SCRIPT_DIR/backup.sh"
+  BACKUP_DIR="$backup_dir" bash "$SCRIPT_DIR/backup.sh"
+  PRE_UPDATE_BACKUP_FILE="$(ls -1t "$backup_dir"/*.tar.gz 2>/dev/null | head -n 1 || true)"
+  [ -n "$PRE_UPDATE_BACKUP_FILE" ] && [ -f "$PRE_UPDATE_BACKUP_FILE" ] || die "更新前备份完成后未找到备份包，已停止更新。"
+  log "更新前备份包: $PRE_UPDATE_BACKUP_FILE"
 }
 
 run_healthcheck() {
@@ -141,7 +194,7 @@ run_healthcheck() {
   }
 
   log "执行更新后健康检查"
-  bash "$SCRIPT_DIR/healthcheck.sh" || log "健康检查发现问题，请查看上方日志。"
+  bash "$SCRIPT_DIR/healthcheck.sh"
 }
 
 normalize_port_csv() {
@@ -193,6 +246,7 @@ load_deploy_env() {
   [ -z "$INPUT_XBOARD_BRANCH" ] || XBOARD_BRANCH="$INPUT_XBOARD_BRANCH"
   [ -z "$INPUT_XBOARD_PORT" ] || XBOARD_PORT="$INPUT_XBOARD_PORT"
   [ -z "$INPUT_PRE_UPDATE_BACKUP" ] || PRE_UPDATE_BACKUP="$INPUT_PRE_UPDATE_BACKUP"
+  [ -z "$INPUT_AUTO_ROLLBACK_ON_UPDATE_FAIL" ] || AUTO_ROLLBACK_ON_UPDATE_FAIL="$INPUT_AUTO_ROLLBACK_ON_UPDATE_FAIL"
 }
 
 apply_defaults() {
@@ -203,6 +257,7 @@ apply_defaults() {
   XBOARD_BRANCH="${XBOARD_BRANCH:-${DEFAULT_XBOARD_BRANCH}}"
   XBOARD_PORT="${XBOARD_PORT:-${DEFAULT_XBOARD_PORT}}"
   PRE_UPDATE_BACKUP="${PRE_UPDATE_BACKUP:-${DEFAULT_PRE_UPDATE_BACKUP}}"
+  AUTO_ROLLBACK_ON_UPDATE_FAIL="${AUTO_ROLLBACK_ON_UPDATE_FAIL:-${DEFAULT_AUTO_ROLLBACK_ON_UPDATE_FAIL}}"
 }
 
 write_npm_compose() {
@@ -274,8 +329,42 @@ PY
   log "compose.yaml 端口映射已更新为 ${XBOARD_PORT}:7001"
 }
 
+wait_for_xboard_redis() {
+  local attempt=1
+  local max_attempts=30
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if run_compose "$XBOARD_DIR" exec -T xboard sh -lc 'test -S /data/redis.sock'; then
+      log "检测到 Xboard 内置 Redis 已就绪"
+      return 0
+    fi
+
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+
+  run_compose "$XBOARD_DIR" logs --tail=120 xboard || true
+  die "Xboard 内置 Redis 未能及时启动，更新失败。"
+}
+
+refresh_xboard_runtime() {
+  log "清理 Xboard 缓存并重启容器"
+  run_compose "$XBOARD_DIR" exec -T xboard php artisan optimize:clear || true
+  run_compose "$XBOARD_DIR" restart xboard
+  wait_for_xboard_redis
+}
+
+run_xboard_post_update() {
+  log "执行 Xboard 数据库迁移和插件更新"
+  wait_for_xboard_redis
+  run_compose "$XBOARD_DIR" exec -T xboard php artisan optimize:clear || true
+  run_compose "$XBOARD_DIR" exec -T xboard php artisan xboard:update
+  refresh_xboard_runtime
+}
+
 main() {
   trap cleanup_env_backup EXIT
+  trap 'handle_update_error $?' ERR
 
   load_deploy_env
   apply_defaults
@@ -295,7 +384,7 @@ main() {
 
   log "更新 Xboard 仓库代码"
   git -C "$XBOARD_DIR" fetch origin "$XBOARD_BRANCH" --depth 1
-  git -C "$XBOARD_DIR" checkout "$XBOARD_BRANCH"
+  git -C "$XBOARD_DIR" checkout -B "$XBOARD_BRANCH" "origin/$XBOARD_BRANCH"
   git -C "$XBOARD_DIR" reset --hard "origin/$XBOARD_BRANCH"
   restore_xboard_env
   ensure_xboard_builtin_redis_config
@@ -305,10 +394,12 @@ main() {
   run_compose "$XBOARD_DIR" pull
   run_compose "$XBOARD_DIR" up -d
   run_compose "$XBOARD_DIR" port xboard 7001
+  run_xboard_post_update
 
   install_menu_shortcut
   run_healthcheck
 
+  UPDATE_COMPLETED=1
   log "更新完成（当前 Xboard 对外端口: $XBOARD_PORT）"
 }
 
