@@ -868,10 +868,11 @@ import sys
 path = Path(sys.argv[1])
 port = sys.argv[2]
 text = path.read_text()
-text_new = text.replace('"7001:7001"', f'"{port}:7001"', 1)
-if text_new == text:
-    text_new = re.sub(r'-\s*"\d+:7001"', f'- "{port}:7001"', text, count=1)
-if text_new == text:
+pattern = re.compile(
+    r'(?m)^(\s*-\s*)(["\']?)(?:[0-9.]+:|\[[^\]]+\]:)?(?:\d+:)?7001(?:/(?:tcp|udp))?\2(\s*(?:#.*)?)$'
+)
+text_new, count = pattern.subn(lambda m: f'{m.group(1)}"{port}:7001"{m.group(3)}', text, count=1)
+if count == 0:
     raise SystemExit('未在 compose.yaml 中找到可替换的 Xboard 端口映射，已停止以避免误改。')
 path.write_text(text_new)
 PY
