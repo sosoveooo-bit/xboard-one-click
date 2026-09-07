@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 PROJECT_NAME="xboard-one-click"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,6 +9,10 @@ XBOARD_DIR="${WORK_DIR}/Xboard"
 DEPLOY_ENV_FILE="${SCRIPT_DIR}/deploy.env"
 NPM_PROXY_TEMPLATE_FILE="${SCRIPT_DIR}/npm-proxy-template.txt"
 FIREWALL_HELPER_FILE="${SCRIPT_DIR}/firewall.sh"
+source "$SCRIPT_DIR/lib/common.sh"
+INSTALL_STATE="fresh"
+INSTALL_BACKUP_FILE=""
+INSTALL_COMPLETE=0
 
 DEFAULT_NPM_HTTP_PORT=80
 DEFAULT_NPM_HTTPS_PORT=443
@@ -110,7 +114,7 @@ need_cmd() {
 run_compose() {
   local dir="$1"
   shift
-  (cd "$dir" && "${COMPOSE_CMD[@]}" "$@")
+  xb_compose "$dir" "$@"
 }
 
 run_privileged() {
@@ -361,6 +365,7 @@ validate_password_value() {
 
 validate_config() {
   local port
+  [ "$AUTO_WRITE_DEPLOY_ENV" = 1 ] || die "安全部署必须保存配置，请启用 AUTO_WRITE_DEPLOY_ENV=1。"
   for port in "$NPM_HTTP_PORT" "$NPM_HTTPS_PORT" "$NPM_ADMIN_PORT" "$XBOARD_PORT"; do
     is_valid_port "$port" || die "端口无效: $port"
   done
@@ -416,43 +421,20 @@ configure_interactively() {
   NPM_HTTPS_PORT="$(prompt_port 'NPM HTTPS 端口' "$NPM_HTTPS_PORT")"
   NPM_ADMIN_PORT="$(prompt_port 'NPM 管理后台端口' "$NPM_ADMIN_PORT")"
   XBOARD_PORT="$(prompt_port 'Xboard 对外端口' "$XBOARD_PORT")"
-  XBOARD_ADMIN_EMAIL="$(prompt_value 'Xboard 管理员邮箱' "$XBOARD_ADMIN_EMAIL")"
+  if [ "$INSTALL_STATE" = fresh ]; then
+    XBOARD_ADMIN_EMAIL="$(prompt_value 'Xboard 管理员邮箱' "$XBOARD_ADMIN_EMAIL")"
+  fi
 
   validate_config
 }
 
 write_deploy_env() {
-  [ "$AUTO_WRITE_DEPLOY_ENV" = "1" ] || return 0
-
-  cat >"$DEPLOY_ENV_FILE" <<EOF
-# xboard-one-click local config
-# 由 install.sh 自动生成/更新
-NPM_HTTP_PORT=${NPM_HTTP_PORT}
-NPM_HTTPS_PORT=${NPM_HTTPS_PORT}
-NPM_ADMIN_PORT=${NPM_ADMIN_PORT}
-EXTRA_NPM_HTTPS_PORTS=${EXTRA_NPM_HTTPS_PORTS}
-CLOUD_FIREWALL_PROVIDER=${CLOUD_FIREWALL_PROVIDER}
-CLOUD_FIREWALL_REGION=${CLOUD_FIREWALL_REGION}
-CLOUD_FIREWALL_GROUP_ID=${CLOUD_FIREWALL_GROUP_ID}
-CLOUD_FIREWALL_PROJECT_ID=${CLOUD_FIREWALL_PROJECT_ID}
-CLOUD_FIREWALL_NETWORK=${CLOUD_FIREWALL_NETWORK}
-CLOUD_FIREWALL_TARGET_TAGS=${CLOUD_FIREWALL_TARGET_TAGS}
-CLOUD_FIREWALL_NSG_ID=${CLOUD_FIREWALL_NSG_ID}
-CLOUD_FIREWALL_SOURCE_CIDR=${CLOUD_FIREWALL_SOURCE_CIDR}
-CLOUD_FIREWALL_RULE_PREFIX=${CLOUD_FIREWALL_RULE_PREFIX}
-XBOARD_PORT=${XBOARD_PORT}
-XBOARD_ADMIN_EMAIL=${XBOARD_ADMIN_EMAIL}
-XBOARD_ADMIN_PASSWORD=${XBOARD_ADMIN_PASSWORD}
-XBOARD_REPO=${XBOARD_REPO}
-XBOARD_BRANCH=${XBOARD_BRANCH}
-ENABLE_FIREWALL_OPEN=${ENABLE_FIREWALL_OPEN}
-FORCE_XBOARD_INSTALL=${FORCE_XBOARD_INSTALL}
-AUTO_RELEASE_NPM_PORTS=${AUTO_RELEASE_NPM_PORTS}
-PRE_UPDATE_BACKUP=${PRE_UPDATE_BACKUP}
-AUTO_ROLLBACK_ON_UPDATE_FAIL=${AUTO_ROLLBACK_ON_UPDATE_FAIL}
-EOF
-
-  log "已写入配置文件: $DEPLOY_ENV_FILE"
+  [ "$AUTO_WRITE_DEPLOY_ENV" = 1 ] || return 0
+  local key
+  local keys=(NPM_HTTP_PORT NPM_HTTPS_PORT NPM_ADMIN_PORT EXTRA_NPM_HTTPS_PORTS CLOUD_FIREWALL_PROVIDER CLOUD_FIREWALL_REGION CLOUD_FIREWALL_GROUP_ID CLOUD_FIREWALL_PROJECT_ID CLOUD_FIREWALL_NETWORK CLOUD_FIREWALL_TARGET_TAGS CLOUD_FIREWALL_NSG_ID CLOUD_FIREWALL_SOURCE_CIDR CLOUD_FIREWALL_RULE_PREFIX XBOARD_PORT XBOARD_ADMIN_EMAIL XBOARD_ADMIN_PASSWORD XBOARD_REPO XBOARD_BRANCH ENABLE_FIREWALL_OPEN FORCE_XBOARD_INSTALL AUTO_RELEASE_NPM_PORTS PRE_UPDATE_BACKUP AUTO_ROLLBACK_ON_UPDATE_FAIL)
+  for key in "${keys[@]}"; do export "$key"; done
+  python3 "$SCRIPT_DIR/lib/operations.py" save-env-from-process "$DEPLOY_ENV_FILE" "${keys[@]}"
+  log "配置已保存，保留未知配置项，密码文件权限为 600: $DEPLOY_ENV_FILE"
 }
 
 init_privilege_helper() {
@@ -481,9 +463,11 @@ install_missing_dependencies() {
   local need_compose=0
   command -v git >/dev/null 2>&1 || missing+=(git)
   command -v python3 >/dev/null 2>&1 || missing+=(python3)
+  command -v curl >/dev/null 2>&1 || missing+=(curl)
+  command -v flock >/dev/null 2>&1 || missing+=(util-linux)
   command -v docker >/dev/null 2>&1 || missing+=(docker)
 
-  if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+  if ! docker compose version >/dev/null 2>&1; then
     need_compose=1
     missing+=(docker-compose)
   fi
@@ -494,6 +478,7 @@ install_missing_dependencies() {
   log "尝试在 Debian/Ubuntu 上自动安装依赖"
 
   local packages=(ca-certificates curl)
+  command -v flock >/dev/null 2>&1 || packages+=(util-linux)
   command -v git >/dev/null 2>&1 || packages+=(git)
   command -v python3 >/dev/null 2>&1 || packages+=(python3)
 
@@ -501,17 +486,17 @@ install_missing_dependencies() {
     packages+=(docker.io)
   fi
 
+  run_privileged apt-get update
   if [ "$need_compose" = "1" ]; then
     if apt-cache show docker-compose-plugin >/dev/null 2>&1; then
       packages+=(docker-compose-plugin)
     elif apt-cache show docker-compose-v2 >/dev/null 2>&1; then
       packages+=(docker-compose-v2)
-    elif apt-cache show docker-compose >/dev/null 2>&1; then
-      packages+=(docker-compose)
+    else
+      die "当前 apt 源没有 Compose v2 插件，请按 https://docs.docker.com/compose/install/linux/ 安装插件后重试；不会使用旧版 docker-compose 继续安装。"
     fi
   fi
 
-  run_privileged apt-get update
   run_privileged apt-get install -y "${packages[@]}"
 
   if command -v systemctl >/dev/null 2>&1; then
@@ -695,6 +680,10 @@ prepare_dirs() {
 
 write_npm_compose() {
   extra_https_ports_to_array
+  if [ -f "$NPM_DIR/compose.yaml" ]; then
+    python3 "$SCRIPT_DIR/lib/operations.py" set-npm-ports "$NPM_DIR/compose.yaml" "$NPM_HTTP_PORT" "$NPM_HTTPS_PORT" "$NPM_ADMIN_PORT" "$EXTRA_NPM_HTTPS_PORTS"
+    return
+  fi
 
   {
     cat <<EOF
@@ -727,6 +716,7 @@ install_npm() {
   release_npm_ports_if_needed
   log "写入 Nginx Proxy Manager compose 配置"
   write_npm_compose
+  python3 "$SCRIPT_DIR/lib/operations.py" inventory "$SCRIPT_DIR"
   log "启动 Nginx Proxy Manager"
   run_compose "$NPM_DIR" up -d
 }
@@ -748,10 +738,8 @@ EOF
 }
 
 run_healthcheck() {
-  [ -f "$SCRIPT_DIR/healthcheck.sh" ] || return 0
-
   log "执行安装后健康检查"
-  bash "$SCRIPT_DIR/healthcheck.sh" || warn "健康检查发现问题，请查看上方日志。"
+  xb_healthcheck "$SCRIPT_DIR"
 }
 
 clone_or_update_xboard() {
@@ -838,6 +826,7 @@ updates = {
     'BROADCAST_DRIVER': 'log',
     'CACHE_DRIVER': 'redis',
     'QUEUE_CONNECTION': 'redis',
+    'ENABLE_AUTO_BACKUP_AND_UPDATE': 'false',
 }
 seen = set()
 out = []
@@ -861,47 +850,8 @@ PY
 }
 
 ensure_xboard_port_mapping() {
-  python3 - "$XBOARD_DIR/compose.yaml" "$XBOARD_PORT" <<'PY'
-from pathlib import Path
-import re
-import sys
-path = Path(sys.argv[1])
-port = sys.argv[2]
-text = path.read_text()
-pattern = re.compile(
-    r'(?m)^(\s*-\s*)(["\']?)(?:[0-9.]+:|\[[^\]]+\]:)?(?:\d+:)?7001(?:/(?:tcp|udp))?\2(\s*(?:#.*)?)$'
-)
-text_new, count = pattern.subn(lambda m: f'{m.group(1)}"{port}:7001"{m.group(3)}', text, count=1)
-if count == 0:
-    raise SystemExit('未在 compose.yaml 中找到可替换的 Xboard 端口映射，已停止以避免误改。')
-path.write_text(text_new)
-PY
-
-  if ! grep -Fq "\"${XBOARD_PORT}:7001\"" "$XBOARD_DIR/compose.yaml"; then
-    die "compose.yaml 端口映射校验失败，未发现 ${XBOARD_PORT}:7001"
-  fi
-
-  log "compose.yaml 端口映射已更新为 ${XBOARD_PORT}:7001"
-}
-
-should_install_xboard() {
-  local env_was_empty="${1:-0}"
-
-  [ "$FORCE_XBOARD_INSTALL" = "1" ] && return 0
-  [ "$env_was_empty" = "1" ] && return 0
-  [ ! -s "$XBOARD_DIR/.env" ] && return 0
-  xboard_env_is_installed || return 0
-  [ ! -s "$XBOARD_DIR/.docker/.data/database.sqlite" ] && return 0
-  xboard_sqlite_has_required_tables || return 0
-  return 1
-}
-
-xboard_env_is_installed() {
-  local env_file="$XBOARD_DIR/.env"
-
-  [ -s "$env_file" ] || return 1
-  grep -q '^APP_KEY=base64:' "$env_file" || return 1
-  grep -qi '^INSTALLED=true' "$env_file" || return 1
+  python3 "$SCRIPT_DIR/lib/operations.py" set-xboard-port "$XBOARD_DIR/compose.yaml" "$XBOARD_PORT"
+  log "Xboard 端口已设为 $XBOARD_PORT；保留原监听地址和其他 Compose 配置。"
 }
 
 xboard_sqlite_has_required_tables() {
@@ -941,21 +891,6 @@ if not seen:
     out.append("INSTALLED=false")
 path.write_text("\n".join(out).rstrip("\n") + "\n")
 PY
-}
-
-archive_xboard_sqlite() {
-  local db="$XBOARD_DIR/.docker/.data/database.sqlite"
-  local ts
-
-  [ -s "$db" ] || [ -e "${db}-wal" ] || [ -e "${db}-shm" ] || return 0
-  ts="$(date +%Y%m%d%H%M%S)"
-  warn "检测到 Xboard SQLite 数据库需要重新初始化，旧库将备份为 database.sqlite.broken-${ts}"
-
-  for suffix in "" "-wal" "-shm"; do
-    if [ -e "${db}${suffix}" ]; then
-      mv "${db}${suffix}" "${db}${suffix}.broken-${ts}"
-    fi
-  done
 }
 
 wait_for_xboard_redis() {
@@ -1053,33 +988,21 @@ echo ($created ? "已创建管理员账号: " : "已重置管理员密码: ") . 
 }
 
 install_xboard() {
-  local env_was_empty=0
-  local env_needs_install=0
-
-  [ ! -s "$XBOARD_DIR/.env" ] && env_was_empty=1
-  clone_or_update_xboard
+  if [ "$INSTALL_STATE" = fresh ]; then
+    clone_or_update_xboard
+    [ "$(python3 "$SCRIPT_DIR/lib/operations.py" install-state "$XBOARD_DIR")" = fresh ] || die "拉取后发现已有数据库，已停止初始化。"
+    prepare_xboard_env
+  else
+    log "复用已有 Xboard 配置、数据库和镜像，不更新代码、不重置密码。"
+  fi
   ensure_xboard_port_mapping
-  prepare_xboard_env
-  xboard_env_is_installed || env_needs_install=1
+  python3 "$SCRIPT_DIR/lib/operations.py" inventory "$SCRIPT_DIR"
 
   log "先启动 Xboard 容器，确保内置 Redis 正常就绪"
   run_compose "$XBOARD_DIR" up -d
   wait_for_xboard_redis
 
-  if should_install_xboard "$env_was_empty"; then
-    local needs_sqlite_archive=0
-    if [ "$FORCE_XBOARD_INSTALL" = "1" ] || [ "$env_was_empty" = "1" ] || [ "$env_needs_install" = "1" ] || { [ -s "$XBOARD_DIR/.docker/.data/database.sqlite" ] && ! xboard_sqlite_has_required_tables; }; then
-      needs_sqlite_archive=1
-    fi
-
-    if [ "$needs_sqlite_archive" = "1" ] && { [ -s "$XBOARD_DIR/.docker/.data/database.sqlite" ] || [ -e "$XBOARD_DIR/.docker/.data/database.sqlite-wal" ] || [ -e "$XBOARD_DIR/.docker/.data/database.sqlite-shm" ]; }; then
-      log "停止 Xboard 容器以安全备份旧 SQLite 数据库"
-      run_compose "$XBOARD_DIR" stop xboard || true
-      archive_xboard_sqlite
-      run_compose "$XBOARD_DIR" up -d
-      wait_for_xboard_redis
-    fi
-
+  if [ "$INSTALL_STATE" = fresh ]; then
     mark_xboard_uninstalled
     log "在已启动的 Xboard 容器内执行初始化（SQLite + 内置 Redis）"
     run_compose "$XBOARD_DIR" exec -T \
@@ -1094,11 +1017,7 @@ install_xboard() {
     fi
     set_xboard_admin_password
   else
-    log "检测到现有 SQLite 数据，跳过 Xboard 初始化。如需强制重装可传入 FORCE_XBOARD_INSTALL=1"
-    if [ -z "$XBOARD_ADMIN_PASSWORD" ]; then
-      warn "本地未保存 Xboard 管理员密码，将生成新密码并重置管理员账号，方便菜单 4 展示"
-      set_xboard_admin_password
-    fi
+    log "现有数据库保持不变；密码未保存也不会重置，需重置请使用独立密码菜单。"
   fi
 
   log "确认 Xboard 维持启动状态"
@@ -1228,7 +1147,7 @@ print_summary() {
 - 云防火墙提供商: ${CLOUD_FIREWALL_PROVIDER:-auto}
 - Xboard 对外端口: ${XBOARD_PORT}
 - Xboard 管理员邮箱: ${XBOARD_ADMIN_EMAIL}
-- Xboard 管理员密码: ${XBOARD_ADMIN_PASSWORD:-未保存}
+- Xboard 管理员密码: 不在安装日志中展示，请在菜单 22 主动查看或重置
 
 目录：
 - NPM: ${NPM_DIR}
@@ -1243,7 +1162,7 @@ print_summary() {
 - Xboard 首页: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}
 - Xboard 管理面板: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}
 - Xboard 登录账号: ${XBOARD_ADMIN_EMAIL}
-- Xboard 登录密码: ${XBOARD_ADMIN_PASSWORD:-未保存}
+- Xboard 登录密码: 请在菜单 22 主动查看或重置
 - 如果 Xboard 直连端口提示 "plain HTTP request was sent to HTTPS port"，请改用 https://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}
 
 已尝试放行端口：
@@ -1289,17 +1208,29 @@ EOF
 }
 
 main() {
+  trap 'installation_exit $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   load_deploy_env
   parse_args "$@"
   apply_defaults
   print_startup_notice
-  configure_interactively
-  validate_config
-  write_deploy_env
-  resolve_server_ip
   init_privilege_helper
   install_missing_dependencies
   check_env
+  xb_require_runtime
+  xb_lock "$SCRIPT_DIR"
+  python3 "$SCRIPT_DIR/lib/operations.py" validate-project "$SCRIPT_DIR"
+  INSTALL_STATE="$(python3 "$SCRIPT_DIR/lib/operations.py" install-state "$XBOARD_DIR")"
+  configure_interactively
+  validate_config
+  if [ "$INSTALL_STATE" = existing ]; then
+    [ "$FORCE_XBOARD_INSTALL" != 1 ] || die "已有数据时禁止 FORCE_XBOARD_INSTALL。需要重装请先自行确认备份，再从卸载菜单操作。"
+    INSTALL_BACKUP_FILE="$(BACKUP_KEEP_STOPPED=1 bash "$SCRIPT_DIR/backup.sh")"
+    python3 "$SCRIPT_DIR/lib/operations.py" pin-images "$SCRIPT_DIR"
+  fi
+  write_deploy_env
+  resolve_server_ip
   prepare_dirs
   install_npm
   install_xboard
@@ -1308,7 +1239,19 @@ main() {
   write_npm_proxy_template
   open_firewall_ports
   run_healthcheck
+  python3 "$SCRIPT_DIR/lib/operations.py" pin-images "$SCRIPT_DIR"
+  INSTALL_COMPLETE=1
   print_summary
 }
 
-main "$@"
+installation_exit() {
+  local status="$1"
+  trap - EXIT
+  if [ "$status" != 0 ] && [ "$INSTALL_COMPLETE" = 0 ] && [ -n "$INSTALL_BACKUP_FILE" ]; then
+    warn "重新配置失败，正在从完整备份恢复原部署。"
+    RESTORE_OVERWRITE=1 bash "$SCRIPT_DIR/restore.sh" "$INSTALL_BACKUP_FILE" || warn "恢复未通过检查，原数据和备份均保留，请查看日志。"
+  fi
+  exit "$status"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

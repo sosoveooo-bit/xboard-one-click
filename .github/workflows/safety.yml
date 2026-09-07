@@ -1,0 +1,44 @@
+name: Safety regression
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      xboard_smoke:
+        description: Also install real Xboard and NPM in a disposable runner
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m unittest discover -s tests -v
+      - run: git diff --check
+  docker-roundtrip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: sudo env XB_DISPOSABLE_DOCKER_TEST=1 python3 tests/integration_docker.py
+  xboard-smoke:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.xboard_smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: sudo env XB_DISPOSABLE_DOCKER_TEST=1 bash tests/smoke_vps.sh

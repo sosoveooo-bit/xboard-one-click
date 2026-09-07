@@ -1,390 +1,109 @@
 #!/usr/bin/env bash
 set -u
-
-PROJECT_NAME="xboard-one-click-healthcheck"
+umask 077
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORK_DIR="${SCRIPT_DIR}/runtime"
-NPM_DIR="${WORK_DIR}/nginx-proxy-manager"
-XBOARD_DIR="${WORK_DIR}/Xboard"
-DEPLOY_ENV_FILE="${SCRIPT_DIR}/deploy.env"
-
-DEFAULT_NPM_HTTP_PORT=80
-DEFAULT_NPM_HTTPS_PORT=443
-DEFAULT_NPM_ADMIN_PORT=81
-DEFAULT_XBOARD_PORT=7001
-DEFAULT_XBOARD_ADMIN_EMAIL="admin@demo.com"
-
-NPM_HTTP_PORT="${NPM_HTTP_PORT:-}"
-NPM_HTTPS_PORT="${NPM_HTTPS_PORT:-}"
-NPM_ADMIN_PORT="${NPM_ADMIN_PORT:-}"
-XBOARD_PORT="${XBOARD_PORT:-}"
-XBOARD_ADMIN_EMAIL="${XBOARD_ADMIN_EMAIL:-}"
-XBOARD_ADMIN_PATH=""
-COMPOSE_CMD=()
+XBOARD_DIR="$SCRIPT_DIR/runtime/Xboard"
+source "$SCRIPT_DIR/lib/common.sh"
 FAILURES=0
+CHECK_TMP=""
 
-info() {
-  printf '[%s] %s\n' "$PROJECT_NAME" "$*"
+info() { printf '[xboard-healthcheck] %s\n' "$*"; }
+fail() { printf '[xboard-healthcheck][FAIL] %s\n' "$*" >&2; FAILURES=$((FAILURES + 1)); }
+
+check_url() {
+  local url="$1" kind="$2" body="$3"
+  curl -ksS --fail --location --max-redirs 3 --proto '=http,https' --proto-redir '=http,https' --max-time 8 "$url" -o "$body" 2>/dev/null || return 1
+  python3 - "$body" "$kind" <<'PY'
+import json
+import sys
+from pathlib import Path
+body = Path(sys.argv[1]).read_text(errors='replace')
+if sys.argv[2] == 'json':
+    try:
+        value = json.loads(body)
+        valid = isinstance(value, dict) and isinstance(value.get('data'), (dict, list))
+    except ValueError:
+        valid = False
+else:
+    valid = '<html' in body.lower() and ('<script' in body.lower() or '<form' in body.lower())
+sys.exit(0 if valid else 1)
+PY
 }
 
-warn() {
-  printf '[%s][WARN] %s\n' "$PROJECT_NAME" "$*" >&2
+check_endpoints() {
+  local admin_path api_path base successful=0
+  admin_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["admin"])' "$CHECK_TMP/app.json")" || return 1
+  api_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["api"])' "$CHECK_TMP/app.json")" || return 1
+  [[ "$admin_path" =~ ^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$ ]] || { fail '后台路径不合法，未发出请求。'; return 1; }
+  [[ "$api_path" =~ ^[A-Za-z0-9_/-]+$ ]] || { fail '公开接口路径不合法。'; return 1; }
+  for base in "http://127.0.0.1:$XBOARD_PORT" "https://127.0.0.1:$XBOARD_PORT"; do
+    if check_url "$base/$admin_path" html "$CHECK_TMP/admin.html" && check_url "$base/$api_path" json "$CHECK_TMP/api.json"; then
+      info "Xboard 后台页面与公开配置接口检查通过: $base/$admin_path"
+      successful=1
+      break
+    fi
+  done
+  [ "$successful" = 1 ] || fail 'Xboard 后台或公开配置接口检查失败；400/404、空响应、错误页面不算就绪。'
+  successful=0
+  for base in "http://127.0.0.1:$NPM_ADMIN_PORT" "https://127.0.0.1:$NPM_ADMIN_PORT"; do
+    if check_url "$base" html "$CHECK_TMP/npm.html"; then successful=1; break; fi
+  done
+  [ "$successful" = 1 ] || fail 'NPM 管理页面检查失败。'
 }
 
-fail() {
-  warn "$*"
-  FAILURES=$((FAILURES + 1))
-}
-
-load_deploy_env() {
-  if [ -f "$DEPLOY_ENV_FILE" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    . "$DEPLOY_ENV_FILE"
-    set +a
-  fi
-
-  NPM_HTTP_PORT="${NPM_HTTP_PORT:-${DEFAULT_NPM_HTTP_PORT}}"
-  NPM_HTTPS_PORT="${NPM_HTTPS_PORT:-${DEFAULT_NPM_HTTPS_PORT}}"
-  NPM_ADMIN_PORT="${NPM_ADMIN_PORT:-${DEFAULT_NPM_ADMIN_PORT}}"
-  XBOARD_PORT="${XBOARD_PORT:-${DEFAULT_XBOARD_PORT}}"
-  XBOARD_ADMIN_EMAIL="${XBOARD_ADMIN_EMAIL:-${DEFAULT_XBOARD_ADMIN_EMAIL}}"
-}
-
-init_compose() {
-  if docker compose version >/dev/null 2>&1; then
-    COMPOSE_CMD=(docker compose)
-  elif command -v docker-compose >/dev/null 2>&1; then
-    COMPOSE_CMD=(docker-compose)
-  else
-    COMPOSE_CMD=()
-  fi
-}
-
-has_compose_file() {
-  local dir="$1"
-  [ -f "$dir/compose.yaml" ] || [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/docker-compose.yaml" ]
-}
-
-run_compose() {
-  local dir="$1"
-  shift
-  (cd "$dir" && "${COMPOSE_CMD[@]}" "$@")
-}
-
-show_command_state() {
-  local cmd="$1"
-  if command -v "$cmd" >/dev/null 2>&1; then
-    info "命令可用: $cmd ($(command -v "$cmd"))"
-  else
-    fail "缺少命令: $cmd"
-  fi
-}
-
-show_port_listener() {
-  local port="$1"
-  local listeners=""
-
-  if command -v ss >/dev/null 2>&1; then
-    listeners="$(ss -H -ltnp 2>/dev/null | awk -v suffix=":${port}" '$4 ~ suffix "$" {print}' || true)"
-  elif command -v netstat >/dev/null 2>&1; then
-    listeners="$(netstat -ltnp 2>/dev/null | awk -v suffix=":${port}" '$4 ~ suffix "$" {print}' || true)"
-  fi
-
-  if [ -n "$listeners" ]; then
-    info "端口 ${port} 监听中:"
-    printf '%s\n' "$listeners"
-  else
-    warn "端口 ${port} 未监听"
-  fi
-}
-
-check_compose_project() {
-  local label="$1"
-  local dir="$2"
-
-  if [ ${#COMPOSE_CMD[@]} -eq 0 ]; then
-    fail "无法检查 ${label}: 未找到 docker compose / docker-compose"
-    return
-  fi
-
-  if ! has_compose_file "$dir"; then
-    fail "无法检查 ${label}: 未找到 Compose 文件: $dir"
-    return
-  fi
-
-  info "${label} Compose 状态"
-  if ! run_compose "$dir" ps; then
-    fail "${label} Compose 状态检查失败"
-  fi
-}
-
-check_http_port() {
-  local label="$1"
-  local port="$2"
-  local code
-  local https_code
-
-  if ! command -v curl >/dev/null 2>&1; then
-    warn "未安装 curl，跳过 HTTP 检查: $label"
-    return
-  fi
-
-  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:${port}" 2>/dev/null || true)"
-  case "$code" in
-    2*|3*)
-      info "${label} 本机 HTTP 检查通过: http://127.0.0.1:${port} (${code})"
-      ;;
-    *)
-      https_code="$(curl -ksS -o /dev/null -w '%{http_code}' --max-time 8 "https://127.0.0.1:${port}" 2>/dev/null || true)"
-      case "$https_code" in
-        2*|3*)
-          info "${label} 本机 HTTPS 检查通过: https://127.0.0.1:${port} (${https_code})，HTTP 返回 ${code:-no-response}"
-          ;;
-        *)
-          fail "${label} 本机 HTTP/HTTPS 检查失败: http=${code:-no-response}, https=${https_code:-no-response}, port=${port}"
-          ;;
-      esac
-      ;;
-  esac
-}
-
-check_xboard_http_port() {
-  local port="$1"
-  local code
-  local https_code
-
-  if ! command -v curl >/dev/null 2>&1; then
-    warn "未安装 curl，跳过 Xboard HTTP 检查"
-    return
-  fi
-
-  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:${port}" 2>/dev/null || true)"
-  case "$code" in
-    2*|3*)
-      info "Xboard 本机 HTTP 检查通过: http://127.0.0.1:${port} (${code})"
-      return
-      ;;
-    4*)
-      info "Xboard 端口有 HTTP 响应: http://127.0.0.1:${port} (${code})；根路径返回 4xx 不视为部署失败"
-      return
-      ;;
-  esac
-
-  https_code="$(curl -ksS -o /dev/null -w '%{http_code}' --max-time 8 "https://127.0.0.1:${port}" 2>/dev/null || true)"
-  case "$https_code" in
-    2*|3*)
-      info "Xboard 本机 HTTPS 检查通过: https://127.0.0.1:${port} (${https_code})，HTTP 返回 ${code:-no-response}"
-      ;;
-    4*)
-      info "Xboard 端口有 HTTPS 响应: https://127.0.0.1:${port} (${https_code})；根路径返回 4xx 不视为部署失败"
-      ;;
-    *)
-      fail "Xboard 本机 HTTP/HTTPS 检查失败: http=${code:-no-response}, https=${https_code:-no-response}, port=${port}"
-      ;;
-  esac
-}
-
-resolve_xboard_admin_path() {
-  XBOARD_ADMIN_PATH=""
-
-  if [ ${#COMPOSE_CMD[@]} -eq 0 ] || ! has_compose_file "$XBOARD_DIR"; then
-    return 1
-  fi
-
-  XBOARD_ADMIN_PATH="$(run_compose "$XBOARD_DIR" exec -T xboard php -r '
+check_application() {
+  xb_compose "$XBOARD_DIR" exec -T --user www xboard php -r '
 require "/www/vendor/autoload.php";
 $app = require "/www/bootstrap/app.php";
-$kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
-$kernel->bootstrap();
-echo admin_setting("secure_path", admin_setting("frontend_admin_path", hash("crc32b", config("app.key"))));
-' 2>/dev/null | tr -d '\r' | awk 'NF {value=$0} END {print value}' || true)"
-
-  case "$XBOARD_ADMIN_PATH" in
-    *[!A-Za-z0-9_-]*|"")
-      XBOARD_ADMIN_PATH=""
-      return 1
-      ;;
-  esac
-
-  return 0
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+if (config("database.default") !== "sqlite") { fwrite(STDERR, "Unexpected database driver\n"); exit(1); }
+Illuminate\Support\Facades\DB::connection()->getPdo();
+foreach (["v2_user", "v2_plugins"] as $table) {
+    if (!Illuminate\Support\Facades\Schema::hasTable($table)) { fwrite(STDERR, "Required table missing\n"); exit(1); }
 }
-
-check_xboard_admin_path() {
-  local port="$1"
-  local http_code
-  local https_code
-
-  if ! command -v curl >/dev/null 2>&1; then
-    warn "未安装 curl，跳过 Xboard 管理面板路径检查"
-    return
-  fi
-
-  if ! resolve_xboard_admin_path; then
-    fail "无法从 Xboard 运行环境解析管理面板路径，请执行: cd $SCRIPT_DIR && ./repair.sh"
-    return
-  fi
-
-  http_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:${port}/${XBOARD_ADMIN_PATH}" 2>/dev/null || true)"
-  case "$http_code" in
-    2*|3*)
-      info "Xboard 管理面板 HTTP 检查通过: http://127.0.0.1:${port}/${XBOARD_ADMIN_PATH} (${http_code})"
-      return
-      ;;
-  esac
-
-  https_code="$(curl -ksS -o /dev/null -w '%{http_code}' --max-time 8 "https://127.0.0.1:${port}/${XBOARD_ADMIN_PATH}" 2>/dev/null || true)"
-  case "$https_code" in
-    2*|3*)
-      info "Xboard 管理面板 HTTPS 检查通过: https://127.0.0.1:${port}/${XBOARD_ADMIN_PATH} (${https_code})；HTTP 返回 ${http_code:-no-response}"
-      ;;
-    *)
-      if [ "$http_code" = "404" ] || [ "$https_code" = "404" ]; then
-        fail "Xboard 管理面板路径返回 404: /${XBOARD_ADMIN_PATH}。请执行菜单 19 或运行: cd $SCRIPT_DIR && ./repair.sh"
-        return
-      fi
-      fail "Xboard 管理面板路径检查失败: path=/${XBOARD_ADMIN_PATH}, http=${http_code:-no-response}, https=${https_code:-no-response}"
-      ;;
-  esac
+if (!App\Models\User::where("is_admin", 1)->where("banned", 0)->exists()) {
+    fwrite(STDERR, "No active administrator; use the explicit password/account recovery workflow\n"); exit(1);
 }
-
-check_xboard_env() {
-  local env_file="$XBOARD_DIR/.env"
-  local db_connection=""
-  local db_database=""
-  local redis_host=""
-  local redis_port=""
-
-  if [ ! -s "$env_file" ]; then
-    fail "Xboard .env 不存在或为空: $env_file"
-    return
-  fi
-
-  info "Xboard .env 存在且非空"
-  grep -q '^APP_KEY=.' "$env_file" || fail "Xboard .env 缺少 APP_KEY 或 APP_KEY 为空"
-  grep -q '^DB_CONNECTION=.' "$env_file" || fail "Xboard .env 缺少 DB_CONNECTION"
-  grep -q '^DB_DATABASE=.' "$env_file" || fail "Xboard .env 缺少 DB_DATABASE"
-  grep -q '^REDIS_HOST=.' "$env_file" || fail "Xboard .env 缺少 REDIS_HOST"
-
-  db_connection="$(awk -F= '$1=="DB_CONNECTION" {print $2; exit}' "$env_file")"
-  db_database="$(awk -F= '$1=="DB_DATABASE" {print $2; exit}' "$env_file")"
-  if [ "$db_connection" != "sqlite" ] || [ "$db_database" != ".docker/.data/database.sqlite" ]; then
-    fail "Xboard SQLite 配置应为 DB_CONNECTION=sqlite 且 DB_DATABASE=.docker/.data/database.sqlite，当前为 DB_CONNECTION=${db_connection:-空}, DB_DATABASE=${db_database:-空}"
-  fi
-
-  redis_host="$(awk -F= '$1=="REDIS_HOST" {print $2; exit}' "$env_file")"
-  redis_port="$(awk -F= '$1=="REDIS_PORT" {print $2; exit}' "$env_file")"
-  if [ "$redis_host" != "/data/redis.sock" ] || [ "$redis_port" != "0" ]; then
-    fail "Xboard 内置 Redis 配置应为 REDIS_HOST=/data/redis.sock 且 REDIS_PORT=0，当前为 REDIS_HOST=${redis_host:-空}, REDIS_PORT=${redis_port:-空}"
-  fi
+Illuminate\Support\Facades\Redis::connection()->ping();
+$api = "";
+foreach ($app["router"]->getRoutes() as $route) {
+    if (in_array("GET", $route->methods(), true) && preg_match("~/guest/comm/config$~", $route->uri())) { $api = $route->uri(); break; }
 }
-
-check_xboard_database_tables() {
-  if [ ${#COMPOSE_CMD[@]} -eq 0 ] || ! has_compose_file "$XBOARD_DIR"; then
-    return
-  fi
-
-  if run_compose "$XBOARD_DIR" exec -T xboard php -r '
-$db = "/www/.docker/.data/database.sqlite";
-if (!is_file($db) || filesize($db) === 0) {
-    exit(1);
-}
-try {
-    $pdo = new PDO("sqlite:" . $db);
-    $stmt = $pdo->query("SELECT name FROM sqlite_master WHERE type = '\''table'\'' AND name = '\''v2_plugins'\''");
-    exit($stmt && $stmt->fetchColumn() ? 0 : 2);
-} catch (Throwable $e) {
-    exit(3);
-}
-' >/dev/null 2>&1; then
-    info "Xboard SQLite 必要表检查通过"
-  else
-    fail "Xboard SQLite 缺少必要表或数据库损坏，请执行: cd $SCRIPT_DIR && ./repair.sh"
-  fi
-}
-
-check_xboard_admin_user() {
-  if [ ${#COMPOSE_CMD[@]} -eq 0 ] || ! has_compose_file "$XBOARD_DIR"; then
-    return
-  fi
-
-  if run_compose "$XBOARD_DIR" exec -T -e XBOARD_ADMIN_EMAIL="$XBOARD_ADMIN_EMAIL" xboard php -r '
-$db = "/www/.docker/.data/database.sqlite";
-$email = strtolower(trim((string)getenv("XBOARD_ADMIN_EMAIL")));
-if (!is_file($db) || filesize($db) === 0 || $email === "") {
-    exit(1);
-}
-try {
-    $pdo = new PDO("sqlite:" . $db);
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM v2_user WHERE lower(email) = :email AND is_admin = 1");
-    $stmt->execute([":email" => $email]);
-    if ((int)$stmt->fetchColumn() > 0) {
-        exit(0);
-    }
-    $count = (int)$pdo->query("SELECT COUNT(*) FROM v2_user WHERE is_admin = 1")->fetchColumn();
-    exit($count > 0 ? 2 : 3);
-} catch (Throwable $e) {
-    exit(4);
-}
-' >/dev/null 2>&1; then
-    info "Xboard 管理员账号检查通过: ${XBOARD_ADMIN_EMAIL}"
-  else
-    fail "Xboard 数据库中未找到 deploy.env 配置的管理员账号: ${XBOARD_ADMIN_EMAIL}。请执行: cd $SCRIPT_DIR && bash repair.sh"
-  fi
-}
-
-show_recent_logs() {
-  local label="$1"
-  local dir="$2"
-  local service="$3"
-
-  [ ${#COMPOSE_CMD[@]} -gt 0 ] || return
-  has_compose_file "$dir" || return
-
-  info "${label} 最近日志"
-  run_compose "$dir" logs --tail=80 "$service" || true
+if ($api === "") { fwrite(STDERR, "Public configuration route not found\n"); exit(1); }
+$admin = trim((string)admin_setting("secure_path", admin_setting("frontend_admin_path", hash("crc32b", config("app.key")))), "/");
+echo json_encode(["admin" => $admin, "api" => $api]);
+' >"$CHECK_TMP/app.json"
 }
 
 main() {
-  load_deploy_env
-  init_compose
-
+  local command_name state
+  FAILURES=0
+  for command_name in python3 docker curl; do
+    command -v "$command_name" >/dev/null 2>&1 || fail "缺少命令: $command_name"
+  done
+  [ "$FAILURES" = 0 ] || return 1
+  NPM_ADMIN_PORT=81
+  XBOARD_PORT=7001
+  if [ -f "$SCRIPT_DIR/deploy.env" ]; then source "$SCRIPT_DIR/deploy.env"; fi
+  [[ "$NPM_ADMIN_PORT" =~ ^[0-9]+$ && "$XBOARD_PORT" =~ ^[0-9]+$ ]] || { fail '端口配置不是数字。'; return 1; }
   info "项目目录: $SCRIPT_DIR"
-  info "NPM 端口: HTTP=${NPM_HTTP_PORT}, HTTPS=${NPM_HTTPS_PORT}, 管理=${NPM_ADMIN_PORT}"
-  info "Xboard 端口: ${XBOARD_PORT}"
-
-  show_command_state docker
-  show_command_state git
-  show_command_state python3
-  command -v curl >/dev/null 2>&1 && show_command_state curl || warn "未安装 curl，HTTP 检查会跳过"
-
-  if command -v docker >/dev/null 2>&1; then
-    docker info >/dev/null 2>&1 || fail "当前用户无法访问 Docker daemon"
+  xb_require_runtime || { fail 'Docker 环境不可用。'; return 1; }
+  python3 "$SCRIPT_DIR/lib/operations.py" check-running "$SCRIPT_DIR" || { fail '容器未就绪或资源归属不匹配。'; return 1; }
+  state="$(python3 "$SCRIPT_DIR/lib/operations.py" install-state "$XBOARD_DIR")" || { fail '数据库或配置检查未通过；不会自动初始化。'; return 1; }
+  [ "$state" = existing ] || { fail '数据库尚未初始化。'; return 1; }
+  CHECK_TMP="$(mktemp -d)" || return 1
+  trap 'rm -f "$CHECK_TMP/app.json" "$CHECK_TMP/admin.html" "$CHECK_TMP/api.json" "$CHECK_TMP/npm.html"; rmdir "$CHECK_TMP" 2>/dev/null || true' EXIT
+  if check_application; then
+    info '应用身份下的数据库、Redis、必要表和管理员检查通过。'
+    check_endpoints || fail 'HTTP 检查执行失败。'
+  else
+    fail '应用检查失败；管理员缺失不会触发重建数据库或自动创建账号。'
   fi
-
-  check_xboard_env
-  check_compose_project "NPM" "$NPM_DIR"
-  check_compose_project "Xboard" "$XBOARD_DIR"
-  check_xboard_database_tables
-  check_xboard_admin_user
-
-  show_port_listener "$NPM_HTTP_PORT"
-  show_port_listener "$NPM_HTTPS_PORT"
-  show_port_listener "$NPM_ADMIN_PORT"
-  show_port_listener "$XBOARD_PORT"
-
-  check_http_port "NPM 管理后台" "$NPM_ADMIN_PORT"
-  check_xboard_http_port "$XBOARD_PORT"
-  check_xboard_admin_path "$XBOARD_PORT"
-
   if [ "$FAILURES" -gt 0 ]; then
-    warn "健康检查发现 ${FAILURES} 个问题，下面输出最近日志辅助排查。"
-    show_recent_logs "NPM" "$NPM_DIR" app
-    show_recent_logs "Xboard" "$XBOARD_DIR" xboard
-    exit 1
+    info '检查未通过。请从菜单查看日志；本次未修改数据。'
+    return 1
   fi
-
-  info "健康检查通过"
+  info '健康检查通过（本机应用就绪；公网 DNS、安全组和证书还需另行确认）。'
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 PROJECT_NAME="xboard-one-click-menu"
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$BASE_DIR/lib/common.sh"
 WORK_DIR="${BASE_DIR}/runtime"
 NPM_DIR="${WORK_DIR}/nginx-proxy-manager"
 XBOARD_DIR="${WORK_DIR}/Xboard"
@@ -172,20 +173,7 @@ echo admin_setting("secure_path", admin_setting("frontend_admin_path", hash("crc
     esac
   fi
 
-  XBOARD_ADMIN_PATH="$(python3 - "$XBOARD_DIR/.env" <<'PY'
-from pathlib import Path
-import binascii
-import sys
-path = Path(sys.argv[1])
-app_key = ""
-for line in path.read_text().splitlines():
-    if line.startswith("APP_KEY="):
-        app_key = line.split("=", 1)[1].strip()
-        break
-if app_key:
-    print(f"{binascii.crc32(app_key.encode()) & 0xffffffff:08x}")
-PY
-)"
+  XBOARD_ADMIN_PATH=""
 }
 
 ensure_compose_ready() {
@@ -220,7 +208,7 @@ run_compose() {
     return 1
   fi
 
-  (cd "$dir" && "${COMPOSE_CMD[@]}" "$@")
+  xb_compose "$dir" "$@"
 }
 
 is_valid_port() {
@@ -244,71 +232,12 @@ extra_https_ports_to_array() {
 }
 
 set_deploy_env_value() {
-  local key="$1"
-  local value="$2"
-
-  python3 - "$DEPLOY_ENV_FILE" "$key" "$value" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-key = sys.argv[2]
-value = sys.argv[3]
-prefix = f"{key}="
-
-if path.exists():
-    lines = path.read_text().splitlines()
-else:
-    lines = [
-        "# xboard-one-click local config",
-        "# 由 menu.sh 自动补充/更新",
-    ]
-
-found = False
-out = []
-for line in lines:
-    if line.startswith(prefix):
-        out.append(f"{key}={value}")
-        found = True
-    else:
-        out.append(line)
-
-if not found:
-    out.append(f"{key}={value}")
-
-path.write_text("\n".join(out).rstrip("\n") + "\n")
-PY
+  python3 "$BASE_DIR/lib/operations.py" env-set "$DEPLOY_ENV_FILE" "$1" "$2"
 }
 
 write_npm_compose() {
   extra_https_ports_to_array
-  mkdir -p "$NPM_DIR/data" "$NPM_DIR/letsencrypt"
-
-  {
-    cat <<EOF
-services:
-  app:
-    image: jc21/nginx-proxy-manager:latest
-    restart: unless-stopped
-    ports:
-      - "${NPM_HTTP_PORT}:80"
-      - "${NPM_HTTPS_PORT}:443"
-      - "${NPM_ADMIN_PORT}:81"
-EOF
-
-    if [[ ${#EXTRA_HTTPS_PORTS_ARRAY[@]} -gt 0 ]]; then
-      local port
-      for port in "${EXTRA_HTTPS_PORTS_ARRAY[@]}"; do
-        printf '      - "%s:443"\n' "$port"
-      done
-    fi
-
-    cat <<EOF
-    volumes:
-      - ./data:/data
-      - ./letsencrypt:/etc/letsencrypt
-EOF
-  } >"$NPM_DIR/compose.yaml"
+  python3 "$BASE_DIR/lib/operations.py" set-npm-ports "$NPM_DIR/compose.yaml" "$NPM_HTTP_PORT" "$NPM_HTTPS_PORT" "$NPM_ADMIN_PORT" "$EXTRA_NPM_HTTPS_PORTS"
 }
 
 show_extra_https_mappings() {
@@ -343,14 +272,23 @@ save_extra_https_ports() {
   set_deploy_env_value "EXTRA_NPM_HTTPS_PORTS" "$EXTRA_NPM_HTTPS_PORTS"
 }
 
-apply_npm_https_mapping_changes() {
-  if ! ensure_npm_ready_for_changes; then
-    return 1
-  fi
-
-  write_npm_compose
-  run_compose "$NPM_DIR" up -d
-}
+apply_npm_https_mapping_changes() (
+  ensure_npm_ready_for_changes || exit 1
+  xb_lock "$BASE_DIR" || exit 1
+  python3 "$BASE_DIR/lib/operations.py" inventory "$BASE_DIR" || exit 1
+  local previous_env previous_compose changed=0
+  previous_env="$(mktemp)" || exit 1
+  previous_compose="$(mktemp)" || exit 1
+  trap 'status=$?; if [ "$status" != 0 ] && [ "$changed" = 1 ]; then cp "$previous_env" "$DEPLOY_ENV_FILE"; cp "$previous_compose" "$NPM_DIR/compose.yaml"; run_compose "$NPM_DIR" up -d || warn "原 NPM 配置恢复启动失败，请查看日志。"; fi; rm -f "$previous_env" "$previous_compose"' EXIT
+  cp "$DEPLOY_ENV_FILE" "$previous_env" || exit 1
+  cp "$NPM_DIR/compose.yaml" "$previous_compose" || exit 1
+  python3 "$BASE_DIR/lib/operations.py" pin-images "$BASE_DIR" || exit 1
+  changed=1
+  write_npm_compose || exit 1
+  run_compose "$NPM_DIR" config --quiet || exit 1
+  run_compose "$NPM_DIR" up -d || exit 1
+  save_extra_https_ports || exit 1
+)
 
 port_conflicts_with_main_services() {
   local port="$1"
@@ -385,7 +323,6 @@ add_npm_https_mapping() {
   fi
 
   EXTRA_NPM_HTTPS_PORTS="$(normalize_port_csv "${EXTRA_NPM_HTTPS_PORTS:+${EXTRA_NPM_HTTPS_PORTS},}${port}")"
-  save_extra_https_ports
 
   if ! apply_npm_https_mapping_changes; then
     warn "NPM 额外 HTTPS 端口映射应用失败。"
@@ -427,7 +364,6 @@ remove_npm_https_mapping() {
   done
 
   EXTRA_NPM_HTTPS_PORTS="$(printf '%s\n' "${remaining[@]}" | awk 'NF && !seen[$0]++ {printf("%s%s", sep, $0); sep=","}')"
-  save_extra_https_ports
 
   if ! apply_npm_https_mapping_changes; then
     warn "NPM 额外 HTTPS 端口映射应用失败。"
@@ -607,9 +543,9 @@ show_access_info() {
   echo "- Xboard 对外端口: ${XBOARD_PORT}"
   echo "- Xboard 管理员邮箱: ${XBOARD_ADMIN_EMAIL}"
   if [[ -n "$XBOARD_ADMIN_PASSWORD" ]]; then
-    echo "- Xboard 管理员密码: ${XBOARD_ADMIN_PASSWORD}"
+    echo '- Xboard 管理员密码: 已保存（隐藏，展示前会核对是否仍然有效）'
   else
-    echo "- Xboard 管理员密码: 未保存（老版本安装无法反查；运行 bash \"${BASE_DIR}/repair.sh\" 可生成并保存新密码）"
+    echo '- Xboard 管理员密码: 未保存；原密码无法反查，请从菜单 22 单独重置'
   fi
   echo
   info "目录"
@@ -625,7 +561,7 @@ show_access_info() {
     echo "- Xboard 管理面板: http://${DETECTED_SERVER_IP}:${XBOARD_PORT}/${XBOARD_ADMIN_PATH}"
     echo "- Xboard 登录账号: ${XBOARD_ADMIN_EMAIL}"
     if [[ -n "$XBOARD_ADMIN_PASSWORD" ]]; then
-      echo "- Xboard 登录密码: ${XBOARD_ADMIN_PASSWORD}"
+      echo '- Xboard 登录密码: 已隐藏'
     else
       echo "- Xboard 登录密码: 未保存"
     fi
@@ -637,6 +573,9 @@ show_access_info() {
   info "管理入口"
   echo "- 直接输入: xb"
   echo "- 菜单原路径: bash \"${BASE_DIR}/menu.sh\""
+  local answer
+  read -r -p '现在验证并展示已保存密码？[y/N]: ' answer || return 0
+  case "$answer" in y|Y) bash "$BASE_DIR/password.sh" --show ;; esac
 }
 
 run_install() {
@@ -675,20 +614,21 @@ run_repair() {
 }
 
 run_restore() {
-  local archive
+  local archive legacy
 
   if [[ ! -f "$BASE_DIR/restore.sh" ]]; then
     warn "未找到恢复脚本: $BASE_DIR/restore.sh"
     return 1
   fi
 
-  read -r -p "请输入备份包路径: " archive
-  if [[ -z "$archive" ]]; then
-    warn "备份包路径不能为空。"
-    return 1
+  archive="$(python3 "$BASE_DIR/lib/operations.py" select-backup "$BASE_DIR")" || return 1
+  read -r -p '旧格式备份可能没有镜像和校验文件。如明确接受此风险，输入 LEGACY；新备份直接回车: ' legacy || return 1
+  if [[ "$legacy" == LEGACY ]]; then
+    ALLOW_LEGACY_RESTORE=1 bash "$BASE_DIR/restore.sh" "$archive" || return 1
+  else
+    bash "$BASE_DIR/restore.sh" "$archive" || return 1
   fi
-
-  bash "$BASE_DIR/restore.sh" "$archive"
+  exec bash "$BASE_DIR/menu.sh"
 }
 
 run_uninstall() {
@@ -702,7 +642,7 @@ run_uninstall() {
   read -r -p "确认继续吗？[y/N]: " confirm
   case "$confirm" in
     y|Y)
-      PURGE_DATA="$purge" bash "$BASE_DIR/uninstall.sh"
+      PURGE_DATA="$purge" UNINSTALL_CONFIRM=DELETE bash "$BASE_DIR/uninstall.sh"
       ;;
     *)
       info "已取消。"
@@ -711,13 +651,16 @@ run_uninstall() {
 }
 
 run_full_uninstall() {
-  warn "即将彻底删除：容器、Docker volume、运行数据、备份目录、xb 快捷命令和整个项目脚本目录。"
+  local remove_backups=0 backup_answer
+  warn "即将删除本项目拥有的容器、数据卷、运行数据、xb 快捷命令和脚本。备份默认保留。"
   warn "此操作不可恢复。"
 
   read -r -p "如确认彻底卸载，请输入 DELETE: " confirm
   case "$confirm" in
     DELETE)
-      PURGE_ALL=1 bash "$BASE_DIR/uninstall.sh"
+      read -r -p '同时永久删除备份？输入 DELETE_BACKUPS；直接回车保留: ' backup_answer || return 1
+      [[ "$backup_answer" != DELETE_BACKUPS ]] || remove_backups=1
+      PURGE_ALL=1 UNINSTALL_CONFIRM=DELETE PURGE_BACKUPS="$remove_backups" PURGE_BACKUPS_CONFIRM="$backup_answer" bash "$BASE_DIR/uninstall.sh" || return 1
       exit 0
       ;;
     *)
@@ -743,12 +686,12 @@ service_action() {
   case "$action" in
     up)
       info "启动 ${label} ..."
-      run_compose "$dir" up -d
+      (xb_lock "$BASE_DIR" && python3 "$BASE_DIR/lib/operations.py" inventory "$BASE_DIR" && run_compose "$dir" up -d) || return 1
       success "${label} 已启动。"
       ;;
     restart)
       info "重启 ${label} ..."
-      run_compose "$dir" restart
+      (xb_lock "$BASE_DIR" && python3 "$BASE_DIR/lib/operations.py" inventory "$BASE_DIR" && run_compose "$dir" restart) || return 1
       success "${label} 已重启。"
       ;;
     logs)
@@ -818,8 +761,10 @@ show_menu() {
   echo "16. 从备份恢复"
   echo "17. 卸载（保留数据）"
   echo "18. 卸载（删除数据）"
-  echo "19. 一键修复 Xboard 初始化 / 数据库 / 配置"
-  echo "20. 彻底卸载全部脚本和所有数据"
+  echo "19. 安全修复现有 Xboard（保留数据库和密码）"
+  echo "20. 彻底卸载本项目（删除备份需另行确认）"
+  echo "21. 更新管理脚本（不更新面板或修改数据）"
+  echo "22. 管理员密码 / 账号恢复"
   echo "0.  退出"
   echo "=========================================="
 }
@@ -830,15 +775,15 @@ main() {
   while true; do
     load_deploy_env
     show_menu
-    read -r -p "请输入选项: " choice
+    read -r -p "请输入选项: " choice || break
     echo
     case "$choice" in
       1)
-        run_install
+        run_install || warn '安装/重新配置未成功或已取消，请查看上方错误。'
         pause
         ;;
       2)
-        run_update
+        run_update || warn '更新未成功，请检查更新和回滚结果。'
         pause
         ;;
       3)
@@ -885,31 +830,40 @@ main() {
         pause
         ;;
       14)
-        run_healthcheck
+        run_healthcheck || warn '健康检查未通过。'
         pause
         ;;
       15)
-        run_backup
+        run_backup || warn '备份未成功，请查看服务是否已恢复启动。'
         pause
         ;;
       16)
-        run_restore
+        run_restore || warn '恢复未成功或已取消；原数据不会被静默删除。'
         pause
         ;;
       17)
-        run_uninstall 0
+        run_uninstall 0 || warn '卸载未成功或已取消。'
         pause
         ;;
       18)
-        run_uninstall 1
+        run_uninstall 1 || warn '卸载未成功或已取消。'
         pause
         ;;
       19)
-        run_repair
+        run_repair || warn '修复未成功；不会重新初始化旧数据库。'
         pause
         ;;
       20)
-        run_full_uninstall
+        run_full_uninstall || warn '彻底卸载未成功或已取消。'
+        pause
+        ;;
+      21)
+        if bash "$BASE_DIR/update-script.sh"; then exec bash "$BASE_DIR/menu.sh"; fi
+        warn '管理脚本更新未成功。'
+        pause
+        ;;
+      22)
+        bash "$BASE_DIR/password.sh" || warn '密码操作未成功或已取消，未自动重建数据库。'
         pause
         ;;
       0)
@@ -924,4 +878,4 @@ main() {
   done
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

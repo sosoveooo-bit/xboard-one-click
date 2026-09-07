@@ -4,3 +4,8 @@ runtime/
 .env.local
 deploy.env
 npm-proxy-template.txt
+__pycache__/
+*.py[cod]
+.backup/
+*.tar.gz
+*.partial

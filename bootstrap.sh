@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/slobys/xboard-one-click.git}"
-BRANCH="${BRANCH:-main}"
+REPO_URL="${REPO_URL:-https://github.com/sosoveooo-bit/xboard-one-click.git}"
+BRANCH="${BRANCH:-codex/fix-xboard-update-env}"
 INSTALL_DIR="${INSTALL_DIR:-/root/xboard-one-click}"
+SCRIPT_ONLY=0
 SUDO_CMD=()
 
 log() {
@@ -47,16 +48,20 @@ ensure_git() {
 }
 
 prepare_repo() {
+  [ "$(basename "$INSTALL_DIR")" = xboard-one-click ] || die "安装目录名称必须为 xboard-one-click。"
+  [ ! -L "$INSTALL_DIR" ] || die "安装目录不能是符号链接。"
   if [ -d "$INSTALL_DIR/.git" ]; then
     log "检测到已有目录，更新到最新代码: $INSTALL_DIR"
+    run_privileged git -c core.filemode=false -C "$INSTALL_DIR" diff --quiet || die "本地脚本存在内容修改，已停止更新以保护修改；请先保存或提交这些修改。"
+    run_privileged git -C "$INSTALL_DIR" diff --cached --quiet || die "暂存区有修改，已停止更新。"
+    run_privileged git -C "$INSTALL_DIR" fetch "$REPO_URL" "$BRANCH"
+    run_privileged git -C "$INSTALL_DIR" update-ref refs/xboard-one-click/previous HEAD
+    run_privileged git -c core.filemode=false -C "$INSTALL_DIR" checkout --detach FETCH_HEAD
     if run_privileged git -C "$INSTALL_DIR" remote get-url origin >/dev/null 2>&1; then
       run_privileged git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL"
     else
       run_privileged git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
     fi
-    run_privileged git -C "$INSTALL_DIR" fetch origin "$BRANCH" --depth 1
-    run_privileged git -C "$INSTALL_DIR" checkout -B "$BRANCH" FETCH_HEAD
-    run_privileged git -C "$INSTALL_DIR" reset --hard FETCH_HEAD
     return 0
   fi
 
@@ -70,18 +75,45 @@ prepare_repo() {
 }
 
 main() {
+  case "${1:-}" in
+    --update-scripts) SCRIPT_ONLY=1 ;;
+    "") ;;
+    *) die "用法: bootstrap.sh [--update-scripts]" ;;
+  esac
   init_privilege_helper
   ensure_git
+  if [ "$(id -u)" -ne 0 ]; then
+    die "请先执行 sudo -i，再运行安装/更新命令。"
+  fi
+  command -v flock >/dev/null 2>&1 || die "缺少 flock，请安装 util-linux。"
+  [ "$(basename "$INSTALL_DIR")" = xboard-one-click ] || die "安装目录名称必须为 xboard-one-click。"
+  case "$INSTALL_DIR" in /*) ;; *) die "INSTALL_DIR 必须是绝对路径。" ;; esac
+  [ "$(realpath -m "$INSTALL_DIR")" = "$INSTALL_DIR" ] || die "安装目录不能包含符号链接、尾部斜杠或相对路径段。"
+  [ ! -L "${INSTALL_DIR}.operation.lock" ] || die "操作锁不能是符号链接。"
+  mkdir -p "$(dirname "$INSTALL_DIR")"
+  if [ "${XB_LOCK_PATH:-}" != "${INSTALL_DIR}.operation.lock" ] || ! (true >&9) 2>/dev/null; then
+    umask 077
+    exec 9>>"${INSTALL_DIR}.operation.lock"
+    flock -n 9 || die "另一个项目操作正在运行。"
+    XB_LOCK_PATH="${INSTALL_DIR}.operation.lock"
+    export XB_LOCK_PATH
+  fi
   prepare_repo
 
-  log "开始执行交互式安装"
-  run_privileged chmod +x "$INSTALL_DIR/install.sh" "$INSTALL_DIR/update.sh" "$INSTALL_DIR/uninstall.sh" "$INSTALL_DIR/menu.sh" "$INSTALL_DIR/bootstrap.sh" "$INSTALL_DIR/firewall.sh" "$INSTALL_DIR/backup.sh" "$INSTALL_DIR/restore.sh" "$INSTALL_DIR/healthcheck.sh" "$INSTALL_DIR/repair.sh"
-
-  if [ "$(id -u)" -eq 0 ]; then
-    exec bash "$INSTALL_DIR/install.sh" --interactive
+  log "当前管理脚本提交: $(git -C "$INSTALL_DIR" rev-parse --short HEAD)"
+  if [ "$SCRIPT_ONLY" = 1 ]; then
+    log "仅管理脚本已更新；未执行安装、更新镜像、重置密码或修改运行数据。"
+    return 0
   fi
-
-  exec "${SUDO_CMD[@]}" bash "$INSTALL_DIR/install.sh" --interactive
+  if [ -d "$INSTALL_DIR/runtime" ]; then
+    log "检测到已有部署目录，进入菜单；不会自动重新安装。"
+    flock -u 9
+    exec 9>&-
+    unset XB_LOCK_PATH
+    exec bash "$INSTALL_DIR/menu.sh"
+  fi
+  log "开始执行交互式安装"
+  exec bash "$INSTALL_DIR/install.sh" --interactive
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
