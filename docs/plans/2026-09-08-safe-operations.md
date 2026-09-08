@@ -22,10 +22,22 @@
 - [x] Scoped uninstall with independent backup deletion confirmation.
 - [x] Explicit password reset/show and numbered backup selection.
 - [x] Fork defaults, script-only updates, migration instructions, and CI tests.
-- [ ] Run syntax checks and local regression tests; review diff and publish the existing fix branch.
+- [x] Run syntax checks and local regression tests; review diff and publish the existing fix branch.
 
 ## Verification
 
 Run `python3 -m unittest discover -s tests -v` and `bash -n` on all shell scripts. Test database flag/probe failures, missing configuration with existing data, default/custom ports, corrupt archives and escaping symlinks, foreign Docker resources, failed health checks, archive selection, and preservation of user/node/config fixtures. Container integration tests must use an isolated disposable Docker project; never run install, restore, or uninstall against the developer workspace or a live VPS as a test.
 
-Local environment has no Docker daemon. Container integration is supplied as an opt-in Linux test and must be reported separately from mocked regression coverage.
+The local Windows environment has no Docker daemon. Local Python/Bash verification passed all 50 regression tests. Real container verification ran on disposable GitHub-hosted Ubuntu runners, not on the user's VPS.
+
+## Verified Results
+
+Runtime commit: `f5b56427fbdb8579b105845955fbae2e286c531f`.
+
+[Safety regression run 34178050730](https://github.com/sosoveooo-bit/xboard-one-click/actions/runs/34178050730) completed successfully on 2026-09-08:
+
+- Regression: all 50 tests, including Bash syntax, database preservation, archive validation, credential behavior, and destructive-operation guards.
+- Docker round trip: exact saved images after the candidate tag changed; preserved SQLite user/node/settings fixtures; restored named volumes without overwriting the previous volumes; scoped uninstall preserved an unrelated volume and the unselected backup.
+- Xboard smoke: real Xboard/NPM installation, current-version repair, deliberately injected post-update failure, successful restoration, preserved database sentinel/admin, and final application readiness.
+
+The final Xboard smoke job completed in 4m59s. This is a CI result, not a promised VPS runtime. Public DNS, cloud firewall rules, certificate issuance, external callbacks, and production business transactions remain deployment-specific checks.
