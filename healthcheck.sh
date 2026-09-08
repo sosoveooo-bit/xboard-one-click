@@ -13,21 +13,7 @@ fail() { printf '[xboard-healthcheck][FAIL] %s\n' "$*" >&2; FAILURES=$((FAILURES
 check_url() {
   local url="$1" kind="$2" body="$3"
   curl -ksS --fail --location --max-redirs 3 --proto '=http,https' --proto-redir '=http,https' --max-time 8 "$url" -o "$body" 2>/dev/null || return 1
-  python3 - "$body" "$kind" <<'PY'
-import json
-import sys
-from pathlib import Path
-body = Path(sys.argv[1]).read_text(errors='replace')
-if sys.argv[2] == 'json':
-    try:
-        value = json.loads(body)
-        valid = isinstance(value, dict) and isinstance(value.get('data'), (dict, list))
-    except ValueError:
-        valid = False
-else:
-    valid = '<html' in body.lower() and ('<script' in body.lower() or '<form' in body.lower())
-sys.exit(0 if valid else 1)
-PY
+  python3 "$SCRIPT_DIR/lib/operations.py" check-response "$body" "$kind"
 }
 
 check_endpoints() {
@@ -46,9 +32,9 @@ check_endpoints() {
   [ "$successful" = 1 ] || fail 'Xboard 后台或公开配置接口检查失败；400/404、空响应、错误页面不算就绪。'
   successful=0
   for base in "http://127.0.0.1:$NPM_ADMIN_PORT" "https://127.0.0.1:$NPM_ADMIN_PORT"; do
-    if check_url "$base" html "$CHECK_TMP/npm.html"; then successful=1; break; fi
+    if check_url "$base" html "$CHECK_TMP/npm.html" && check_url "$base/api/" npm-json "$CHECK_TMP/npm-api.json"; then successful=1; break; fi
   done
-  [ "$successful" = 1 ] || fail 'NPM 管理页面检查失败。'
+  [ "$successful" = 1 ] || fail 'NPM 管理页面或后台接口检查失败。'
 }
 
 check_application() {
@@ -92,12 +78,12 @@ main() {
   state="$(python3 "$SCRIPT_DIR/lib/operations.py" install-state "$XBOARD_DIR")" || { fail '数据库或配置检查未通过；不会自动初始化。'; return 1; }
   [ "$state" = existing ] || { fail '数据库尚未初始化。'; return 1; }
   CHECK_TMP="$(mktemp -d)" || return 1
-  trap 'rm -f "$CHECK_TMP/app.json" "$CHECK_TMP/admin.html" "$CHECK_TMP/api.json" "$CHECK_TMP/npm.html"; rmdir "$CHECK_TMP" 2>/dev/null || true' EXIT
+  trap 'rm -f "$CHECK_TMP/app.json" "$CHECK_TMP/admin.html" "$CHECK_TMP/api.json" "$CHECK_TMP/npm.html" "$CHECK_TMP/npm-api.json"; rmdir "$CHECK_TMP" 2>/dev/null || true' EXIT
   if check_application; then
     info '应用身份下的数据库、Redis、必要表和管理员检查通过。'
     check_endpoints || fail 'HTTP 检查执行失败。'
   else
-    fail '应用检查失败；管理员缺失不会触发重建数据库或自动创建账号。'
+    fail '应用引导、数据库、Redis 或管理员检查未通过；请看上方具体错误，脚本未重建数据库。'
   fi
   if [ "$FAILURES" -gt 0 ]; then
     info '检查未通过。请从菜单查看日志；本次未修改数据。'

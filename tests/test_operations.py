@@ -203,6 +203,31 @@ class ComposeTests(WorkspaceCase):
         self.assertEqual([port["published"] for port in result["ports"]], ["80", "443", "35612", "36333"])
 
 
+class HttpResponseTests(WorkspaceCase):
+    def test_xboard_api_requires_nonempty_configuration(self):
+        path = self.parent / "response.json"
+        for data in ('{"error":"failed"}', '{"data":[]}', '{"data":{}}', 'not-json'):
+            path.write_text(data)
+            self.assertFalse(ops.check_response(path, "json"))
+        path.write_text('{"data":{"captcha_type":"recaptcha"}}')
+        self.assertTrue(ops.check_response(path, "json"))
+
+    def test_npm_requires_its_backend_health_response(self):
+        path = self.parent / "response.json"
+        path.write_text('{"status":"OK","version":{"major":2},"setup":false}')
+        self.assertTrue(ops.check_response(path, "npm-json"))
+        path.write_text('{"status":"error","version":{"major":2}}')
+        self.assertFalse(ops.check_response(path, "npm-json"))
+
+    def test_html_error_text_or_json_is_not_a_panel_page(self):
+        path = self.parent / "response.html"
+        for data in ('<html><body>Bad request</body></html>', '{}', ''):
+            path.write_text(data)
+            self.assertFalse(ops.check_response(path, "html"))
+        path.write_text('<!doctype html><html><script src="app.js"></script></html>')
+        self.assertTrue(ops.check_response(path, "html"))
+
+
 class ArchiveTests(WorkspaceCase):
     def test_checksum_uses_digest_not_the_old_server_filename(self):
         self.assertEqual(ops.validate_archive(self.archive())["version"], 2)
@@ -290,6 +315,50 @@ class OwnershipTests(WorkspaceCase):
                 ops.uninstall(self.project, "all", True, other)
             inspect.assert_not_called()
 
+    def test_backup_does_not_claim_a_directory_with_personal_files(self):
+        directory = self.parent / "personal"
+        directory.mkdir()
+        document = directory / "notes.txt"
+        document.write_text("must remain untouched")
+        with patch.object(ops, "inventory") as inspect:
+            with self.assertRaisesRegex(ops.OperationError, "Unrecognized file"):
+                ops.backup(self.project, directory)
+            inspect.assert_not_called()
+        self.assertEqual(document.read_text(), "must remain untouched")
+        self.assertFalse((directory / ".xboard-backup-owner").exists())
+
+    def test_purge_refuses_mixed_files_even_with_an_ownership_marker(self):
+        directory = Path(str(self.project) + "-backups")
+        directory.mkdir()
+        (directory / ".xboard-backup-owner").write_text(str(self.project))
+        (directory / "personal-photo.jpg").write_bytes(b"unrelated")
+        with patch.object(ops, "inventory") as inspect:
+            with self.assertRaisesRegex(ops.OperationError, "Unrecognized file"):
+                ops.uninstall(self.project, "all", purge_backups=True)
+            inspect.assert_not_called()
+        self.assertTrue(self.database.exists())
+        self.assertEqual((directory / "personal-photo.jpg").read_bytes(), b"unrelated")
+
+    def test_custom_named_archive_is_recognized_by_its_own_metadata(self):
+        directory = Path(str(self.project) + "-backups")
+        directory.mkdir()
+        (directory / "migration.tar.gz").write_bytes(b"fixture")
+        ops.write_json(directory / "migration.tar.gz.info", {"version": 2, "project": str(self.project)})
+        (directory / "migration.tar.gz.sha256").write_text("fixture checksum")
+        ops.validate_backup_contents(directory, self.project)
+
+    def test_existing_partial_backup_is_not_overwritten(self):
+        directory = Path(str(self.project) + "-backups")
+        directory.mkdir()
+        output = directory / "xboard-one-click-backup-20260908-100000.tar.gz"
+        partial = Path(str(output) + ".partial")
+        partial.write_bytes(b"previous interrupted backup")
+        with patch.object(ops, "inventory") as inspect:
+            with self.assertRaisesRegex(ops.OperationError, "already exists"):
+                ops.backup(self.project, directory, output=output)
+            inspect.assert_not_called()
+        self.assertEqual(partial.read_bytes(), b"previous interrupted backup")
+
 
 class RecoveryTests(WorkspaceCase):
     def fake_image_inspect(self, *args):
@@ -337,6 +406,7 @@ class RecoveryTests(WorkspaceCase):
     def test_healthcheck_nonzero_is_never_reported_as_success(self):
         with patch.object(ops.subprocess, "run") as command, patch.object(ops.time, "sleep"):
             command.return_value.returncode = 42
+            command.return_value.stdout = "synthetic failure\n"
             with self.assertRaisesRegex(ops.OperationError, "did NOT succeed"):
                 ops.healthcheck(self.project)
             self.assertEqual(command.call_count, 6)

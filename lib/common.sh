@@ -50,12 +50,19 @@ xb_wait_redis() {
 }
 
 xb_healthcheck() {
-  local project="$1" attempt
+  local project="$1" attempt output
   [ -f "$project/healthcheck.sh" ] || { echo '缺少 healthcheck.sh，不能确认服务已恢复。' >&2; return 1; }
+  output="$(mktemp)" || return 1
   for attempt in 1 2 3 4 5 6; do
-    if HEALTHCHECK_BRIEF=1 bash "$project/healthcheck.sh"; then return 0; fi
-    [ "$attempt" = 6 ] || sleep 5
+    if HEALTHCHECK_BRIEF=1 bash "$project/healthcheck.sh" >"$output" 2>&1; then
+      cat "$output"
+      rm -f "$output"
+      return 0
+    fi
+    if [ "$attempt" != 6 ]; then echo "服务仍在启动，等待就绪（${attempt}/6）..." >&2; sleep 5; fi
   done
+  cat "$output" >&2
+  rm -f "$output"
   echo '服务就绪检查失败，操作未成功。' >&2
   return 1
 }

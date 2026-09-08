@@ -23,6 +23,7 @@ def execute():
     original_cwd = Path.cwd()
     namespace = "xb-ci-" + uuid.uuid4().hex[:12]
     candidate = namespace + ":candidate"
+    unrelated_volume = "xboard_" + namespace + "_unrelated"
     for image in ("busybox:1.36.1", "busybox:1.37.0"):
         ops.run(["docker", "pull", image])
     original_image = ops.docker_json("image", "inspect", "busybox:1.36.1")[0]["Id"]
@@ -60,6 +61,7 @@ for stack in nginx-proxy-manager Xboard; do
 done
 ''')
         original_volumes = set()
+        unrelated_created = False
         try:
             ops.start_stacks(project)
             for stack in ops.inventory(project, require_all=True):
@@ -91,7 +93,13 @@ done
             for name in original_volumes:
                 value = ops.run(["docker", "run", "--rm", "--network", "none", "--mount", "type=volume,src=" + name + ",dst=/data,readonly", "busybox:1.36.1", "cat", "/data/sentinel"], capture=True)
                 assert value == "changed-volume"
-            print("Real Docker round trip passed: exact images, SQLite users/nodes/settings, isolated named volumes")
+            ops.run(["docker", "volume", "create", "--label", "xb-ci-test=" + namespace, unrelated_volume])
+            unrelated_created = True
+            ops.uninstall(project, "data")
+            assert not (project / "runtime").exists()
+            assert archive.is_file(), "Uninstall deleted an unselected backup"
+            assert ops.docker_json("volume", "inspect", unrelated_volume), "Uninstall touched an unrelated volume"
+            print("Real Docker round trip passed: exact images, SQLite users/nodes/settings, isolated named volumes, scoped uninstall")
         finally:
             if project.exists():
                 try:
@@ -101,6 +109,8 @@ done
             restored_volumes = ops.run(["docker", "volume", "ls", "-q", "--filter", "label=com.xboard.one-click.project=" + str(project)], capture=True).split()
             for name in sorted(original_volumes | set(restored_volumes)):
                 subprocess.run(["docker", "volume", "rm", name], check=False)
+            if unrelated_created:
+                subprocess.run(["docker", "volume", "rm", unrelated_volume], check=False)
             subprocess.run(["docker", "image", "rm", candidate], check=False)
             os.chdir(original_cwd)
 

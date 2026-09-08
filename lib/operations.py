@@ -117,6 +117,22 @@ def set_npm_ports(path, http, https, admin, extra):
     write_json(path, config)
 
 
+def check_response(path, kind):
+    body = Path(path).read_text(encoding="utf-8", errors="replace")
+    if kind == "html":
+        text = body.lower()
+        return "<html" in text and ("<script" in text or "<form" in text)
+    try:
+        value = json.loads(body)
+    except ValueError:
+        return False
+    if not isinstance(value, dict):
+        return False
+    if kind == "npm-json":
+        return value.get("status") == "OK" and isinstance(value.get("version"), dict)
+    return isinstance(value.get("data"), dict) and bool(value["data"])
+
+
 def atomic_text(path, value, mode=0o600):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,6 +225,41 @@ def safe_backup_directory(path, project):
     if inside(path, project) or inside(project, path):
         raise OperationError("Backup and project directories must not contain each other")
     return path
+
+
+def validate_backup_contents(directory, project):
+    directory = Path(directory)
+    if not directory.exists():
+        return
+    legacy_name = re.compile(r"xboard-one-click-backup-[0-9]{8}-[0-9]{6}(?:-[0-9a-f]{6})?\.tar\.gz(?:\.(?:sha256|info|partial))?\Z")
+    for entry in directory.iterdir():
+        if entry.is_symlink():
+            raise OperationError("Backup directory contains a symlink; refusing ownership/deletion: " + entry.name)
+        if entry.is_dir():
+            if entry.name not in ("pre-update", "pre-repair"):
+                raise OperationError("Unrecognized directory inside backup location: " + entry.name)
+            validate_backup_contents(entry, project)
+            continue
+        if not entry.is_file():
+            raise OperationError("Backup directory contains a special file")
+        if entry.name == ".xboard-backup-owner":
+            if entry.read_text().strip() != str(project):
+                raise OperationError("Backup directory belongs to another project")
+            continue
+        if legacy_name.fullmatch(entry.name):
+            continue
+        basename = entry.name
+        for suffix in (".sha256", ".info", ".partial"):
+            if basename.endswith(suffix):
+                basename = basename[:-len(suffix)]
+                break
+        info = directory / (basename + ".info")
+        try:
+            metadata = json.loads(info.read_text()) if basename.endswith(".tar.gz") and not info.is_symlink() else {}
+        except (OSError, ValueError):
+            metadata = {}
+        if metadata.get("version") != 2 or metadata.get("project") != str(project):
+            raise OperationError("Unrecognized file in backup directory; preserve it or choose a dedicated empty directory: " + entry.name)
 
 
 def sqlite_report(path):
@@ -453,13 +504,22 @@ def backup(project, backup_dir, output=None, keep_stopped=False):
     project = safe_project(project)
     backup_dir = safe_backup_directory(backup_dir, project)
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name == "posix":
+        permissions = backup_dir.stat()
+        if permissions.st_uid != os.geteuid() or permissions.st_mode & 0o022:
+            raise OperationError("Backup directory must be owned by the current user and not writable by other users")
+    validate_backup_contents(backup_dir, project)
     owner_file = backup_dir / ".xboard-backup-owner"
     if owner_file.exists() and owner_file.read_text().strip() != str(project):
         raise OperationError("Backup directory belongs to another project")
     atomic_text(owner_file, str(project) + "\n")
     output = Path(output).absolute() if output else backup_dir / ("xboard-one-click-backup-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6] + ".tar.gz")
-    if output.parent.resolve() != backup_dir or output.exists() or output.is_symlink():
-        raise OperationError("Backup output must be a new file directly inside the backup directory")
+    if output.parent.resolve() != backup_dir or not output.name.endswith(".tar.gz") or output.exists() or output.is_symlink():
+        raise OperationError("Backup output must be a new .tar.gz file directly inside the backup directory")
+    for suffix in (".partial", ".sha256", ".info"):
+        artifact = Path(str(output) + suffix)
+        if artifact.exists() or artifact.is_symlink():
+            raise OperationError("Backup artifact name already exists; choose a new output name: " + artifact.name)
     stacks = inventory(project, require_all=True)
     all_ids = {item["Id"] for stack in stacks for item in stack["services"].values()}
     images, volumes, manifest_stacks, running = {}, {}, [], []
@@ -509,6 +569,7 @@ def backup(project, backup_dir, output=None, keep_stopped=False):
                 stopped.append(container_id)
                 run(["docker", "stop", container_id])
             for name, volume in volumes.items():
+                log("Snapshotting named volume: " + name)
                 run(["docker", "run", "--rm", "--network", "none", "--user", "0", "--entrypoint", "tar",
                      "--mount", "type=volume,src=" + name + ",dst=/source,readonly",
                      "--mount", "type=bind,src=" + str(payload_dir) + ",dst=/backup",
@@ -520,13 +581,15 @@ def backup(project, backup_dir, output=None, keep_stopped=False):
                 if member.name == project.name + "/.backup" or member.name.startswith(project.name + "/.backup/"):
                     return None
                 return member
-            with tarfile.open(partial, "w:gz", dereference=False) as handle:
+            log("Archiving project and image snapshots (fast compression; services remain paused)")
+            with tarfile.open(partial, "w:gz", dereference=False, compresslevel=1) as handle:
                 handle.add(project, arcname=project.name, filter=archive_filter)
                 handle.add(payload_dir, arcname=project.name + "/.backup")
             os.chmod(partial, 0o600)
             os.replace(partial, output)
             atomic_text(str(output) + ".sha256", hash_file(output) + "  " + output.name + "\n")
             write_json(str(output) + ".info", {"created_at": manifest["created_at"], "project": str(project), "bytes": output.stat().st_size, "version": 2})
+            log("Validating the complete archive before reporting success")
             validate_archive(output)
     except BaseException as exc:
         backup_error = exc
@@ -579,11 +642,16 @@ def healthcheck(project):
     if not script.is_file():
         raise OperationError("Missing healthcheck.sh; restoration cannot be verified")
     for attempt in range(6):
-        result = subprocess.run(["bash", str(script)], env={**os.environ, "HEALTHCHECK_BRIEF": "1"}, stdout=sys.stderr)
+        result = subprocess.run(["bash", str(script)], env={**os.environ, "HEALTHCHECK_BRIEF": "1"}, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         if result.returncode == 0:
+            if result.stdout:
+                print(result.stdout, file=sys.stderr, end="")
             return
         if attempt < 5:
+            log("Waiting for application readiness ({}/6)".format(attempt + 1))
             time.sleep(5)
+    if result.stdout:
+        print(result.stdout, file=sys.stderr, end="")
     raise OperationError("Readiness checks failed; operation did NOT succeed")
 
 
@@ -728,6 +796,8 @@ def uninstall(project, mode, purge_backups=False, backup_dir=None):
         marker = backups / ".xboard-backup-owner"
         if not marker.is_file() or marker.read_text().strip() != str(project):
             raise OperationError("Custom backup directory ownership cannot be verified")
+    if purge_backups:
+        validate_backup_contents(backups, project)
     runtime = project / "runtime"
     if runtime.is_symlink() or not inside(runtime, project):
         raise OperationError("Unsafe runtime directory")
@@ -769,7 +839,7 @@ def uninstall(project, mode, purge_backups=False, backup_dir=None):
             shutil.rmtree(backups)
         os.chdir(project.parent)
         shutil.rmtree(project)
-    log("Requested data removed permanently. Unselected backups and previous restore directories were retained")
+    log("Requested data removed permanently. Image caches, unselected backups and previous restore directories were retained")
 
 
 def select_backup(project):
@@ -800,6 +870,9 @@ def main(argv=None):
     item = commands.add_parser("check-counts")
     item.add_argument("baseline")
     item.add_argument("database")
+    item = commands.add_parser("check-response")
+    item.add_argument("path")
+    item.add_argument("kind", choices=("html", "json", "npm-json"))
     item = commands.add_parser("env-get")
     item.add_argument("path")
     item.add_argument("key")
@@ -865,6 +938,9 @@ def main(argv=None):
         set_env(args.path, credentials)
     elif args.command == "check-counts":
         check_counts(args.baseline, args.database)
+    elif args.command == "check-response":
+        if not check_response(args.path, args.kind):
+            raise OperationError("Response is not a valid ready application page/API result")
     elif args.command == "inventory":
         inventory(safe_project(args.path))
     elif args.command == "validate-project":
