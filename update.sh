@@ -58,19 +58,21 @@ main() {
   fi
   BASELINE_FILE="$(mktemp)"
   python3 "$SCRIPT_DIR/lib/operations.py" sqlite-check "$XBOARD_DIR/.docker/.data/database.sqlite" >"$BASELINE_FILE"
-  python3 "$SCRIPT_DIR/lib/operations.py" normalize-existing-env "$XBOARD_DIR"
+  local env_changed
+  local recreate=()
+  env_changed="$(python3 "$SCRIPT_DIR/lib/operations.py" normalize-existing-env "$XBOARD_DIR")"
+  # Atomic .env changes need a new bind mount; unchanged files keep their inode.
+  [ "$env_changed" != changed ] || recreate+=(--force-recreate)
   echo '[xboard-update] 使用现有 Compose 和 .env 更新镜像，不覆盖数据库连接、端口或站点配置。'
-  python3 "$SCRIPT_DIR/lib/operations.py" unpin-images "$SCRIPT_DIR"
-  xb_compose "$XBOARD_DIR" pull
-  xb_compose "$NPM_DIR" pull
-  xb_compose "$XBOARD_DIR" up -d --force-recreate
+  python3 "$SCRIPT_DIR/lib/operations.py" pull-candidate-images "$SCRIPT_DIR"
+  xb_compose "$XBOARD_DIR" up -d "${recreate[@]}"
   xb_wait_redis "$XBOARD_DIR"
   xb_compose "$XBOARD_DIR" exec -T xboard php artisan xboard:update
   xb_compose "$XBOARD_DIR" exec -T xboard php artisan optimize:clear
   xb_compose "$XBOARD_DIR" restart
   xb_wait_redis "$XBOARD_DIR"
   python3 "$SCRIPT_DIR/lib/operations.py" check-counts "$BASELINE_FILE" "$XBOARD_DIR/.docker/.data/database.sqlite"
-  xb_compose "$NPM_DIR" up -d --force-recreate
+  xb_compose "$NPM_DIR" up -d
   python3 "$SCRIPT_DIR/lib/operations.py" pin-images "$SCRIPT_DIR"
   xb_healthcheck "$SCRIPT_DIR"
   UPDATE_COMPLETED=1

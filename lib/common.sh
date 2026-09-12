@@ -40,13 +40,9 @@ xb_require_runtime() {
 }
 
 xb_wait_redis() {
-  local dir="$1" attempt
-  for attempt in $(seq 1 30); do
-    if xb_compose "$dir" exec -T xboard redis-cli -s /data/redis.sock ping 2>/dev/null | grep -qx PONG; then return 0; fi
-    sleep 2
-  done
-  echo 'Redis 未就绪；不会重新初始化数据库。' >&2
-  return 1
+  local helper
+  helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/operations.py"
+  python3 "$helper" wait-redis "$1" --seconds "${XBOARD_REDIS_WAIT_SECONDS:-600}"
 }
 
 xb_healthcheck() {

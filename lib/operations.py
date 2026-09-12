@@ -324,11 +324,16 @@ def normalize_existing_env(directory):
     directory = Path(directory)
     if install_state(directory) != "existing":
         raise OperationError("No existing database to repair")
-    set_env(directory / ".env", {
+    updates = {
         "INSTALLED": "true",
         "DB_DATABASE": ".docker/.data/database.sqlite",
         "ENABLE_AUTO_BACKUP_AND_UPDATE": "false",
-    })
+    }
+    values = read_env(directory / ".env")
+    if all(values.get(key) == value for key, value in updates.items()):
+        return False
+    set_env(directory / ".env", updates)
+    return True
 
 
 def check_counts(baseline, database):
@@ -397,6 +402,76 @@ def pin_images(project):
             run(["docker", "image", "tag", container["Image"], reference])
             services[service] = {"image": reference, "pull_policy": "never"}
         write_json(project / stack["directory"] / ".xb-images.json", {"services": services})
+
+
+def pull_candidate_images(project):
+    stacks = inventory(project, require_all=True)
+    pending = []
+    for stack in stacks:
+        directory = project / stack["directory"]
+        lock = directory / ".xb-images.json"
+        if lock.is_symlink():
+            raise OperationError("Image lock must not be a symlink")
+        args = compose_args(directory)
+        # Pull the configured source image, not the previous immutable snapshot.
+        if ".xb-images.json" in args:
+            index = args.index(".xb-images.json")
+            del args[index - 1:index + 1]
+        config = json.loads(run(args + ["config", "--format", "json"], cwd=directory, capture=True))
+        run(args + ["pull"], cwd=directory)
+        services = {}
+        for service, data in config.get("services", {}).items():
+            image_id = docker_json("image", "inspect", data["image"])[0]["Id"]
+            reference = local_image_ref(image_id)
+            run(["docker", "image", "tag", image_id, reference])
+            services[service] = {"image": reference, "pull_policy": "never"}
+            previous = stack["services"].get(service, {}).get("Image")
+            log(service + (": image unchanged; Compose will reuse it when configuration matches" if previous == image_id else ": new image downloaded"))
+        pending.append((lock, {"services": services}))
+    # Keep old locks when either image pull fails.
+    for path, data in pending:
+        write_json(path, data)
+
+
+def wait_redis(directory, timeout_seconds=600):
+    if not 1 <= timeout_seconds <= 3600:
+        raise OperationError("XBOARD_REDIS_WAIT_SECONDS must be between 1 and 3600")
+    args = compose_args(directory)
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    next_report = started
+    last_error = "Redis did not return PONG"
+
+    def probe(command):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            return subprocess.run(command, cwd=directory, capture_output=True, text=True,
+                                  timeout=min(5, remaining))
+        except subprocess.TimeoutExpired:
+            return None
+
+    log("等待 Redis PONG，最长 {} 秒；NAS 启动时可能仍在处理目录权限。".format(timeout_seconds))
+    while time.monotonic() < deadline:
+        result = probe(args + ["exec", "-T", "xboard", "redis-cli", "-s", "/data/redis.sock", "ping"])
+        if result is not None and result.returncode == 0 and result.stdout.strip() == "PONG":
+            log("Redis 已就绪（等待 {} 秒）".format(int(time.monotonic() - started)))
+            return
+        if result is not None:
+            last_error = (result.stderr or result.stdout).strip()[-1000:] or last_error
+        if time.monotonic() >= next_report:
+            ids = probe(args + ["ps", "-a", "-q", "xboard"])
+            if ids is not None and ids.returncode == 0 and ids.stdout.strip():
+                state = probe(["docker", "inspect", "--format", "{{.State.Status}}", ids.stdout.split()[0]])
+                if state is not None and state.returncode == 0 and state.stdout.strip() in ("exited", "dead", "removing"):
+                    raise OperationError("Xboard 容器已退出，停止等待；请查看容器日志，不会重新初始化数据库")
+            log("Redis 仍在启动（已等待 {}/{} 秒），请不要重复点击更新。".format(int(time.monotonic() - started), timeout_seconds))
+            next_report = time.monotonic() + 30
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(2, remaining))
+    raise OperationError("Redis 等待超时；没有重建数据库。最近探测结果: " + last_error)
 
 
 def unpin_images(project):
@@ -865,8 +940,11 @@ def select_backup(project):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("install-state", "sqlite-check", "pin-images", "unpin-images", "check-running", "inventory", "validate-project", "select-backup", "normalize-existing-env", "save-credentials"):
+    for name in ("install-state", "sqlite-check", "pin-images", "pull-candidate-images", "unpin-images", "check-running", "inventory", "validate-project", "select-backup", "normalize-existing-env", "save-credentials"):
         commands.add_parser(name).add_argument("path")
+    item = commands.add_parser("wait-redis")
+    item.add_argument("path")
+    item.add_argument("--seconds", type=int, default=600)
     item = commands.add_parser("check-counts")
     item.add_argument("baseline")
     item.add_argument("database")
@@ -925,12 +1003,16 @@ def main(argv=None):
         set_npm_ports(args.path, args.http, args.https, args.admin, args.extra)
     elif args.command == "pin-images":
         pin_images(safe_project(args.path))
+    elif args.command == "pull-candidate-images":
+        pull_candidate_images(safe_project(args.path))
+    elif args.command == "wait-redis":
+        wait_redis(args.path, args.seconds)
     elif args.command == "unpin-images":
         unpin_images(safe_project(args.path))
     elif args.command == "check-running":
         check_running(safe_project(args.path))
     elif args.command == "normalize-existing-env":
-        normalize_existing_env(args.path)
+        print("changed" if normalize_existing_env(args.path) else "unchanged")
     elif args.command == "save-credentials":
         credentials = {key: os.environ[key] for key in ("XBOARD_ADMIN_EMAIL", "XBOARD_ADMIN_PASSWORD")}
         if not credentials["XBOARD_ADMIN_EMAIL"] or len(credentials["XBOARD_ADMIN_PASSWORD"]) < 12:

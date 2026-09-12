@@ -183,6 +183,8 @@ python3() {
     install-state) echo existing ;;
     sqlite-check) echo '{}' ;;
     check-counts) return "${MOCK_COUNTS_STATUS:-0}" ;;
+    normalize-existing-env) echo "${MOCK_ENV_RESULT:-unchanged}" ;;
+    pull-candidate-images) return "${MOCK_PULL_STATUS:-0}" ;;
   esac
 }
 xb_compose() {
@@ -215,6 +217,7 @@ if [ -n "${UPDATE_ARGUMENT:-}" ]; then main "$UPDATE_ARGUMENT"; else main; fi
         self.assertIn("HEALTH 2", result.stderr)
         self.assertIn("PYTHON check-counts", result.stderr)
         self.assertIn("本次未创建备份", result.stdout)
+        self.assertNotIn("--force-recreate", result.stderr)
         self.assertEqual((self.project / "snapshot.tar.gz").read_bytes(), b"existing-backup-must-survive")
 
     def test_direct_update_failure_never_restores_an_old_backup(self):
@@ -227,6 +230,11 @@ if [ -n "${UPDATE_ARGUMENT:-}" ]; then main "$UPDATE_ARGUMENT"; else main; fi
                 self.assertNotIn("RESTORE_CALLED", result.stderr)
                 self.assertIn("未执行自动回滚", result.stderr)
                 self.assertNotIn("更新及数据检查通过", result.stdout)
+
+    def test_changed_env_refreshes_its_bind_mount(self):
+        result = self.update_fixture(MOCK_ENV_RESULT="changed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--force-recreate", result.stderr)
 
     def test_explicit_backup_mode_still_supports_rollback(self):
         result = self.update_fixture("--with-backup", MOCK_MIGRATION_STATUS="42")

@@ -41,6 +41,13 @@ python3 "$TEST_PROJECT/lib/operations.py" env-set "$TEST_PROJECT/deploy.env" PRE
 bash "$TEST_PROJECT/update.sh"
 test ! -d "${TEST_PROJECT}-backups/pre-update"
 bash "$TEST_PROJECT/healthcheck.sh"
+source "$TEST_PROJECT/lib/common.sh"
+before_container="$(xb_compose "$TEST_PROJECT/runtime/Xboard" ps -q xboard)"
+python3 "$TEST_PROJECT/lib/operations.py" pull-candidate-images "$TEST_PROJECT"
+xb_compose "$TEST_PROJECT/runtime/Xboard" up -d
+after_container="$(xb_compose "$TEST_PROJECT/runtime/Xboard" ps -q xboard)"
+[ -n "$before_container" ] && [ "$before_container" = "$after_container" ] || { echo 'Unchanged image/configuration recreated the container unexpectedly.' >&2; exit 1; }
+echo 'Unchanged image/configuration reused the running Xboard container.'
 bash "$TEST_PROJECT/repair.sh"
 
 DOCKER_BINARY="$(command -v docker)"

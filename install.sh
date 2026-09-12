@@ -894,22 +894,7 @@ PY
 }
 
 wait_for_xboard_redis() {
-  local attempt=1
-  local max_attempts=30
-
-  while [ "$attempt" -le "$max_attempts" ]; do
-    if run_compose "$XBOARD_DIR" exec -T xboard sh -lc 'test -S /data/redis.sock'; then
-      log "检测到 Xboard 内置 Redis 已就绪"
-      return 0
-    fi
-
-    sleep 2
-    attempt=$((attempt + 1))
-  done
-
-  warn "等待 Xboard 内置 Redis 就绪超时，输出最近日志供排查"
-  run_compose "$XBOARD_DIR" logs --tail=80 xboard || true
-  die "Xboard 内置 Redis 未能及时启动，已停止安装。"
+  xb_wait_redis "$XBOARD_DIR"
 }
 
 refresh_xboard_runtime() {
