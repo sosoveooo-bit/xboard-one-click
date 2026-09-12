@@ -13,9 +13,13 @@ AUTO_ROLLBACK_ON_UPDATE_FAIL=1
 finish_update() {
   local status="$1"
   trap - EXIT
-  if [ "$status" != 0 ] && [ "$UPDATE_COMPLETED" = 0 ] && [ -n "$PRE_UPDATE_BACKUP_FILE" ]; then
-    echo "[xboard-update] 更新失败，完整备份: $PRE_UPDATE_BACKUP_FILE" >&2
-    if [ "$AUTO_ROLLBACK_ON_UPDATE_FAIL" = 1 ]; then
+  if [ "$status" != 0 ] && [ "$UPDATE_COMPLETED" = 0 ]; then
+    if [ -z "$PRE_UPDATE_BACKUP_FILE" ]; then
+      echo '[xboard-update][WARN] 更新未成功；本次没有可用的更新前备份，未执行自动回滚。请查看上方错误，不要盲目重装或删除数据。' >&2
+    else
+      echo "[xboard-update] 更新失败，完整备份: $PRE_UPDATE_BACKUP_FILE" >&2
+    fi
+    if [ -n "$PRE_UPDATE_BACKUP_FILE" ] && [ "$AUTO_ROLLBACK_ON_UPDATE_FAIL" = 1 ]; then
       if RESTORE_OVERWRITE=1 bash "$SCRIPT_DIR/restore.sh" "$PRE_UPDATE_BACKUP_FILE"; then
         echo '[xboard-update] 原镜像和数据已恢复，健康检查通过。' >&2
       else
@@ -34,12 +38,24 @@ main() {
   xb_require_runtime
   xb_lock "$SCRIPT_DIR"
   if [ -f "$SCRIPT_DIR/deploy.env" ]; then source "$SCRIPT_DIR/deploy.env"; fi
-  [ "${PRE_UPDATE_BACKUP:-1}" = 1 ] || { echo '安全更新必须先完成备份，不能设置 PRE_UPDATE_BACKUP=0。' >&2; return 1; }
+  local with_backup=0
+  case "${1:-}" in
+    '') ;;
+    --with-backup) with_backup=1 ;;
+    *) echo '用法: bash update.sh [--with-backup]' >&2; return 1 ;;
+  esac
+  [ "$#" -le 1 ] || { echo '更新参数过多。' >&2; return 1; }
+  if [ "$with_backup" = 0 ]; then
+    echo '[xboard-update][WARN] 本次直接更新：不创建备份，失败不能自动恢复原数据库。旧 PRE_UPDATE_BACKUP 配置不再决定更新方式。' >&2
+  fi
   [ "$(python3 "$SCRIPT_DIR/lib/operations.py" install-state "$XBOARD_DIR")" = existing ] || { echo '未找到可更新的现有数据库。' >&2; return 1; }
   python3 "$SCRIPT_DIR/lib/operations.py" inventory "$SCRIPT_DIR"
   echo '[xboard-update] 检查当前部署是否健康；已有故障请先修复。'
   xb_healthcheck "$SCRIPT_DIR"
-  PRE_UPDATE_BACKUP_FILE="$(BACKUP_KEEP_STOPPED=1 BACKUP_DIR="${SCRIPT_DIR}-backups/pre-update" bash "$SCRIPT_DIR/backup.sh")"
+  if [ "$with_backup" = 1 ]; then
+    PRE_UPDATE_BACKUP_FILE="$(BACKUP_KEEP_STOPPED=1 BACKUP_DIR="${SCRIPT_DIR}-backups/pre-update" bash "$SCRIPT_DIR/backup.sh")"
+    [ -n "$PRE_UPDATE_BACKUP_FILE" ] && [ -f "$PRE_UPDATE_BACKUP_FILE" ] || { echo '备份没有返回有效文件，已停止更新。' >&2; return 1; }
+  fi
   BASELINE_FILE="$(mktemp)"
   python3 "$SCRIPT_DIR/lib/operations.py" sqlite-check "$XBOARD_DIR/.docker/.data/database.sqlite" >"$BASELINE_FILE"
   python3 "$SCRIPT_DIR/lib/operations.py" normalize-existing-env "$XBOARD_DIR"
@@ -58,7 +74,11 @@ main() {
   python3 "$SCRIPT_DIR/lib/operations.py" pin-images "$SCRIPT_DIR"
   xb_healthcheck "$SCRIPT_DIR"
   UPDATE_COMPLETED=1
-  echo "[xboard-update] 更新及数据检查通过。回滚备份: $PRE_UPDATE_BACKUP_FILE"
+  if [ -n "$PRE_UPDATE_BACKUP_FILE" ]; then
+    echo "[xboard-update] 更新及数据检查通过。回滚备份: $PRE_UPDATE_BACKUP_FILE"
+  else
+    echo '[xboard-update] 更新及数据检查通过。本次未创建备份，未删除已有备份。'
+  fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

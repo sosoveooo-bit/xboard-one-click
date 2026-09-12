@@ -29,7 +29,7 @@ DEFAULT_INTERACTIVE_CONFIG=0
 DEFAULT_AUTO_WRITE_DEPLOY_ENV=1
 DEFAULT_AUTO_INSTALL_DEPS=1
 DEFAULT_AUTO_RELEASE_NPM_PORTS=1
-DEFAULT_PRE_UPDATE_BACKUP=1
+DEFAULT_PRE_UPDATE_BACKUP=0
 DEFAULT_AUTO_ROLLBACK_ON_UPDATE_FAIL=1
 
 INPUT_SERVER_IP="${SERVER_IP:-}"
@@ -277,8 +277,8 @@ print_usage() {
 补充：
   AUTO_INSTALL_DEPS=1 时，会在 Debian/Ubuntu 上自动安装缺失依赖（如 docker）
   AUTO_RELEASE_NPM_PORTS=1 时，会尝试停止 nginx/apache/openresty/caddy 释放 NPM 端口
-  PRE_UPDATE_BACKUP=1 时，更新前会自动生成迁移备份
-  AUTO_ROLLBACK_ON_UPDATE_FAIL=1 时，更新失败会自动从更新前备份回滚
+  更新默认不备份；仅 bash update.sh --with-backup 会创建更新前备份
+  AUTO_ROLLBACK_ON_UPDATE_FAIL=1 仅在本次已创建备份时生效
 EOF
 }
 

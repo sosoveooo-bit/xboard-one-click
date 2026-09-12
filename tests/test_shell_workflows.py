@@ -163,6 +163,96 @@ prepare_repo
         self.assertIn("sosoveooo-bit/xboard-one-click", result.stdout)
         self.assertNotIn("slobys", result.stdout)
 
+    def update_fixture(self, argument="", **environment):
+        (self.project / "snapshot.tar.gz").write_bytes(b"existing-backup-must-survive")
+        (self.project / "deploy.env").write_text("PRE_UPDATE_BACKUP=1\nAUTO_ROLLBACK_ON_UPDATE_FAIL=1\n")
+        return self.bash('''
+source "$1/update.sh"
+xb_require_runtime() { :; }
+xb_lock() { :; }
+checks=0
+xb_healthcheck() {
+  checks=$((checks + 1))
+  echo "HEALTH $checks" >&2
+  if [ "${MOCK_HEALTH_FAIL:-0}" = "$checks" ]; then return 77; fi
+}
+xb_wait_redis() { :; }
+python3() {
+  echo "PYTHON $2" >&2
+  case "$2" in
+    install-state) echo existing ;;
+    sqlite-check) echo '{}' ;;
+    check-counts) return "${MOCK_COUNTS_STATUS:-0}" ;;
+  esac
+}
+xb_compose() {
+  echo "COMPOSE $*" >&2
+  case " $* " in
+    *' pull '*) return "${MOCK_PULL_STATUS:-0}" ;;
+    *' php artisan xboard:update '*) return "${MOCK_MIGRATION_STATUS:-0}" ;;
+  esac
+}
+bash() {
+  case "$1" in
+    */backup.sh)
+      echo BACKUP_CALLED >&2
+      [ "${MOCK_BACKUP_STATUS:-0}" = 0 ] || return "$MOCK_BACKUP_STATUS"
+      echo "$SCRIPT_DIR/snapshot.tar.gz"
+      ;;
+    */restore.sh) echo RESTORE_CALLED >&2 ;;
+    *) echo UNEXPECTED_SCRIPT >&2; return 99 ;;
+  esac
+}
+if [ -n "${UPDATE_ARGUMENT:-}" ]; then main "$UPDATE_ARGUMENT"; else main; fi
+''', UPDATE_ARGUMENT=argument, **environment)
+
+    def test_direct_update_ignores_legacy_backup_setting_and_never_calls_backup(self):
+        result = self.update_fixture(MOCK_BACKUP_STATUS="66")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("BACKUP_CALLED", result.stderr)
+        self.assertNotIn("RESTORE_CALLED", result.stderr)
+        self.assertIn("php artisan xboard:update", result.stderr)
+        self.assertIn("HEALTH 2", result.stderr)
+        self.assertIn("PYTHON check-counts", result.stderr)
+        self.assertIn("本次未创建备份", result.stdout)
+        self.assertEqual((self.project / "snapshot.tar.gz").read_bytes(), b"existing-backup-must-survive")
+
+    def test_direct_update_failure_never_restores_an_old_backup(self):
+        for settings in ({"MOCK_PULL_STATUS": "41"}, {"MOCK_MIGRATION_STATUS": "42"},
+                         {"MOCK_HEALTH_FAIL": "2"}, {"MOCK_COUNTS_STATUS": "43"}):
+            with self.subTest(settings=settings):
+                result = self.update_fixture(**settings)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("BACKUP_CALLED", result.stderr)
+                self.assertNotIn("RESTORE_CALLED", result.stderr)
+                self.assertIn("未执行自动回滚", result.stderr)
+                self.assertNotIn("更新及数据检查通过", result.stdout)
+
+    def test_explicit_backup_mode_still_supports_rollback(self):
+        result = self.update_fixture("--with-backup", MOCK_MIGRATION_STATUS="42")
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertIn("BACKUP_CALLED", result.stderr)
+        self.assertIn("RESTORE_CALLED", result.stderr)
+
+    def test_explicit_backup_failure_never_falls_back_to_direct_update(self):
+        result = self.update_fixture("--with-backup", MOCK_BACKUP_STATUS="66")
+        self.assertEqual(result.returncode, 66, result.stderr)
+        self.assertIn("BACKUP_CALLED", result.stderr)
+        self.assertNotIn("COMPOSE", result.stderr)
+        self.assertNotIn("RESTORE_CALLED", result.stderr)
+
+    def test_preflight_failure_blocks_direct_update(self):
+        result = self.update_fixture(MOCK_HEALTH_FAIL="1")
+        self.assertEqual(result.returncode, 77, result.stderr)
+        self.assertNotIn("COMPOSE", result.stderr)
+        self.assertNotIn("BACKUP_CALLED", result.stderr)
+
+    def test_invalid_update_flag_is_rejected(self):
+        result = self.update_fixture("--with-bakcup")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("COMPOSE", result.stderr)
+        self.assertNotIn("BACKUP_CALLED", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

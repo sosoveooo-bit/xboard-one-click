@@ -744,7 +744,7 @@ show_menu() {
   echo "      Xboard One Click 管理菜单"
   echo "=========================================="
   echo "1.  安装 / 重新配置（交互式）"
-  echo "2.  安全更新 Xboard / NPM（先备份，失败自动回滚）"
+  echo "2.  直接更新 Xboard / NPM（不备份，无自动回滚）"
   echo "3.  查看服务状态"
   echo "4.  查看访问信息"
   echo "5.  放行额外端口"
@@ -783,7 +783,7 @@ main() {
         pause
         ;;
       2)
-        run_update || warn '更新未成功，请检查更新和回滚结果。'
+        run_update || warn '更新未成功，请查看上方错误；菜单 2 不备份、不自动回滚。'
         pause
         ;;
       3)

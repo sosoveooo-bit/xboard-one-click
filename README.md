@@ -40,7 +40,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sosoveooo-bit/xboard-one-cli
 | 菜单 | 用途 |
 | --- | --- |
 | 1 | 安装或重新配置端口；有旧数据时先备份，不初始化旧库 |
-| 2 | 更新 Xboard/NPM 镜像；必须先完整备份，失败默认自动回滚 |
+| 2 | 直接更新 Xboard/NPM 镜像；不备份，无自动回滚 |
 | 4 | 查看入口和账号；密码默认隐藏，可主动验证后展示 |
 | 14 | 本机应用健康检查 |
 | 15 | 完整备份 |
@@ -55,15 +55,25 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sosoveooo-bit/xboard-one-cli
 
 安装、更新、备份、恢复、修复、密码操作和卸载使用同一个操作锁，不要同时从多个终端执行维护命令。
 
-### 安全更新
+### 直接更新（默认不备份）
 
 ```bash
 bash /root/xboard-one-click/update.sh
 ```
 
-更新使用现有 Compose 配置和 `.env`，不强制切换数据库或覆盖站点地址。它保存准确镜像和数据卷后暂停旧容器，拉取候选镜像、迁移数据库、清理缓存、检查业务记录和关键配置，最后执行应用就绪检查。
+菜单 2 和上述命令默认不运行备份、不导出镜像或数据卷，因此不会被完整备份的磁盘空间要求阻止。旧 `deploy.env` 中即使仍有 `PRE_UPDATE_BACKUP=1`，也不会自动备份。手动备份菜单 15 保留，旧备份不会被删除。菜单 1 的重新配置、菜单 19 的修复仍按原流程先备份。
 
-失败时默认恢复原镜像、配置、SQLite 和命名数据卷；恢复本身也必须通过检查。更新失败即使回滚成功，命令仍返回非零，便于识别结果。`PRE_UPDATE_BACKUP=0` 不再允许进行安全更新。若明确关闭 `AUTO_ROLLBACK_ON_UPDATE_FAIL`，必须自行使用保留的备份恢复。
+直接更新保留现有 Compose 和 `.env`，保留健康检查、迁移、缓存清理及业务记录/关键配置检查。临时保存的记录数量和配置指纹仅供比较，不是可恢复的数据库备份。拉取、解压镜像本身仍需要 Docker 所在磁盘有足够空间。
+
+**无备份更新失败后不能自动恢复原数据库或原部署。** 脚本会返回错误，不会谎报回滚成功，也不会自动选择以前的旧备份覆盖当前数据。请安排维护窗口；数据库迁移或上游镜像不兼容仍可能导致服务不可用。
+
+仅在你明确需要更新前完整备份和失败回滚时，使用：
+
+```bash
+bash /root/xboard-one-click/update.sh --with-backup
+```
+
+这个显式模式仍要求备份成功才开始更新，备份失败不会偷偷转为无备份更新。`AUTO_ROLLBACK_ON_UPDATE_FAIL=1` 仅在本次已生成有效备份时生效；回滚也必须通过检查。更新失败即使回滚成功，命令仍返回非零。
 
 不要从 Xboard 面板内的系统更新按钮绕过脚本保护。新安装、安全更新及安全修复会禁用应用内自动更新；仅更新管理脚本不会修改应用配置。
 
@@ -99,7 +109,7 @@ bash /root/xboard-one-click/password.sh --reset 实际管理员邮箱
 bash /root/xboard-one-click/backup.sh
 ```
 
-默认目录：`/root/xboard-one-click-backups`。更新、修复的备份分别位于其 `pre-update`、`pre-repair` 子目录。
+默认目录：`/root/xboard-one-click-backups`。显式 `--with-backup` 更新和修复的备份分别位于其 `pre-update`、`pre-repair` 子目录；默认更新不创建备份。
 
 完整备份包含项目文件、`.env`、SQLite、用户/节点配置、NPM 配置与证书、准确容器镜像和命名数据卷（包括 Redis 持久化数据）。不支持默默漏掉项目目录之外的 bind mount 或其他项目同时使用的数据卷；遇到这些情况会停止。
 

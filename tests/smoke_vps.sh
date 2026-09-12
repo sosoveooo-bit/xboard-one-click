@@ -36,6 +36,11 @@ with closing(sqlite3.connect(db)) as connection, connection:
     connection.execute('CREATE TABLE xb_ci_sentinel (name TEXT PRIMARY KEY, value TEXT)')
     connection.execute("INSERT INTO xb_ci_sentinel VALUES ('node-config', 'must-survive-repair-and-rollback')")
 PY
+# Old deploy.env values must not force a backup during the default update.
+python3 "$TEST_PROJECT/lib/operations.py" env-set "$TEST_PROJECT/deploy.env" PRE_UPDATE_BACKUP 1
+bash "$TEST_PROJECT/update.sh"
+test ! -d "${TEST_PROJECT}-backups/pre-update"
+bash "$TEST_PROJECT/healthcheck.sh"
 bash "$TEST_PROJECT/repair.sh"
 
 DOCKER_BINARY="$(command -v docker)"
@@ -48,7 +53,7 @@ esac
 exec "$DOCKER_BINARY" "\$@"
 EOF
 chmod +x "$TEST_ROOT/bin/docker"
-if PATH="$TEST_ROOT/bin:$PATH" bash "$TEST_PROJECT/update.sh" 2>&1 | tee "$TEST_ROOT/update.log"; then
+if PATH="$TEST_ROOT/bin:$PATH" bash "$TEST_PROJECT/update.sh" --with-backup 2>&1 | tee "$TEST_ROOT/update.log"; then
   echo 'Expected update failure was incorrectly reported as success.' >&2
   exit 1
 else
@@ -67,5 +72,5 @@ db = Path(sys.argv[1]) / 'runtime/Xboard/.docker/.data/database.sqlite'
 with closing(sqlite3.connect(db)) as connection:
     assert connection.execute("SELECT value FROM xb_ci_sentinel WHERE name='node-config'").fetchone()[0] == 'must-survive-repair-and-rollback'
     assert connection.execute('SELECT COUNT(*) FROM v2_user WHERE is_admin=1').fetchone()[0] > 0
-print('Real Xboard install, repair, forced update failure, and rollback passed.')
+print('Real Xboard install, direct update without backup, repair, explicit backed-up failure, and rollback passed.')
 PY
